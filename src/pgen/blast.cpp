@@ -416,8 +416,24 @@ void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
   int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
   int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
 
-  Real a = 1.0 + fac*(t-t0);
-  Real a2 = a*a;
+  // We want to set the Minkowski space before t_0 and FLRW after. 
+  Real temp;
+  Real a;
+  Real a2;
+
+  if(t < t0) {
+    a = 1.0;
+    a2 = a*a;
+    temp = 0.0; 
+  } else {
+    a = 1.0 + fac*(t-t0);
+    a2 = a*a;
+    temp = -a*fac;
+  }
+
+
+  // Real a = 1.0 + fac*(t-t0);
+  // Real a2 = a*a;
   par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real &x1min = size.d_view(m).x1min;
@@ -439,12 +455,12 @@ void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
     adm.g_dd(m,1,2,k,j,i) = 0.0;
     adm.g_dd(m,2,2,k,j,i) = a2;
 
-    adm.vK_dd(m,0,0,k,j,i) = -a*fac;
+    adm.vK_dd(m,0,0,k,j,i) = temp;
     adm.vK_dd(m,0,1,k,j,i) = 0.0;
     adm.vK_dd(m,0,2,k,j,i) = 0.0;
-    adm.vK_dd(m,1,1,k,j,i) = -a*fac;
+    adm.vK_dd(m,1,1,k,j,i) = temp;
     adm.vK_dd(m,1,2,k,j,i) = 0.0;
-    adm.vK_dd(m,2,2,k,j,i) = -a*fac;
+    adm.vK_dd(m,2,2,k,j,i) = temp;
 
     adm.alpha(m,k,j,i) = 1.0;
     adm.beta_u(m,0,k,j,i) = 0.0;
