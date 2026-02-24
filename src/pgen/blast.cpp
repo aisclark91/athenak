@@ -432,8 +432,6 @@ void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
   }
 
 
-  // Real a = 1.0 + fac*(t-t0);
-  // Real a2 = a*a;
   par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real &x1min = size.d_view(m).x1min;
