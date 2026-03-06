@@ -147,7 +147,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   Real rout = pin->GetReal("problem", "outer_radius");
   Real rin  = rout - pin->GetReal("problem", "inner_radius");
-  Real rbound = pin->GetReal("problem", "inner_boundary");
   // values for neutrals (hydro fluid)
   Real pn_amb   = pin->GetOrAddReal("problem", "pn_amb", 1.0);
   Real dn_amb   = pin->GetOrAddReal("problem", "dn_amb", 1.0);
@@ -216,17 +215,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real den = dn_amb;
       Real pres = pn_amb;
 
-      Real rad = x1v*x1v + x2v*x2v + x3v*x3v;
+      Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
       Real vel_x = 0.0;
       Real vel_y = 0.0;
       Real vel_z = 0.0;
 
       if (rad < rout) {
-        if (rad > rbound) {
-          vel_x = v0 * (rad/rout)* x1v / rad;
-          vel_y = v0 * (rad/rout)* x2v / rad;
-          vel_z = v0 * (rad/rout)* x3v / rad;
-        }
+        vel_x = v0 * (x1v/rout);
+        vel_y = v0 * (x2v/rout);
+        vel_z = v0 * (x3v/rout);
         if (rad < rin) {
           den *= drat;
           pres *= prat;
@@ -295,17 +292,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real den = di_amb;
       Real pres = pi_amb;
 
-      Real rad = x1v*x1v + x2v*x2v + x3v*x3v;
+      Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
       Real vel_x = 0.0; 
       Real vel_y = 0.0; 
       Real vel_z = 0.0;
 
       if (rad < rout) {
-        if (rad > rbound) {
-          vel_x = v0 * (rad/rout)* x1v / rad;
-          vel_y = v0 * (rad/rout)* x2v / rad;
-          vel_z = v0 * (rad/rout)* x3v / rad;
-        }
+        vel_x = v0 * (x1v/rout);
+        vel_y = v0 * (x2v/rout);
+        vel_z = v0 * (x3v/rout);
         if (rad < rin) {
           den *= drat;
           pres *= prat;
@@ -458,17 +453,17 @@ void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
 
   par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    Real &x1min = size.d_view(m).x1min;
-    Real &x1max = size.d_view(m).x1max;
-    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+    // Real &x1min = size.d_view(m).x1min;
+    // Real &x1max = size.d_view(m).x1max;
+    // Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
 
-    Real &x2min = size.d_view(m).x2min;
-    Real &x2max = size.d_view(m).x2max;
-    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+    // Real &x2min = size.d_view(m).x2min;
+    // Real &x2max = size.d_view(m).x2max;
+    // Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
 
-    Real &x3min = size.d_view(m).x3min;
-    Real &x3max = size.d_view(m).x3max;
-    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+    // Real &x3min = size.d_view(m).x3min;
+    // Real &x3max = size.d_view(m).x3max;
+    // Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
     adm.g_dd(m,0,0,k,j,i) = a2;
     adm.g_dd(m,0,1,k,j,i) = 0.0;
