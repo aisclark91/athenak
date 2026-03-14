@@ -146,7 +146,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (restart) return;
 
   Real rout = pin->GetReal("problem", "outer_radius");
-  Real rin  = rout - pin->GetReal("problem", "inner_radius");
+  Real rin  = pin->GetReal("problem", "inner_radius");
   // values for neutrals (hydro fluid)
   Real pn_amb   = pin->GetOrAddReal("problem", "pn_amb", 1.0);
   Real dn_amb   = pin->GetOrAddReal("problem", "dn_amb", 1.0);
@@ -221,9 +221,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real vel_z = 0.0;
 
       if (rad < rout) {
-        vel_x = v0 * (x1v/rout);
-        vel_y = v0 * (x2v/rout);
-        vel_z = v0 * (x3v/rout);
+        vel_x = v0 * x1v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
+        vel_y = v0 * x2v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
+        vel_z = v0 * x3v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
         if (rad < rin) {
           den *= drat;
           pres *= prat;
@@ -298,9 +298,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real vel_z = 0.0;
 
       if (rad < rout) {
-        vel_x = v0 * (x1v/rout);
-        vel_y = v0 * (x2v/rout);
-        vel_z = v0 * (x3v/rout);
+        vel_x = v0 * x1v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
+        vel_y = v0 * x2v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
+        vel_z = v0 * x3v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
         if (rad < rin) {
           den *= drat;
           pres *= prat;
