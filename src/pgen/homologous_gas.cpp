@@ -27,106 +27,116 @@
 #include "coordinates/cell_locations.hpp"
 
 namespace {
-  Real R_max0;     // Maximum radius at t=t0.
-  Real v_max;      // Maximum speed.
+  Real R_m;     // Maximum radius at t=t0.
+  Real v_m;      // Maximum speed.
   Real t0;
   Real fac;
   void SetADMVariablesToFLRW(MeshBlockPack *pmbp);
 }
 
-KOKKOS_INLINE_FUNCTION
-Real GetCartesianFromSnake(Real w, Real y, Real A, Real k) {
-  return w + A*sin(k*M_PI*y);
-}
+// KOKKOS_INLINE_FUNCTION
+// Real a_factor(Real t, Real t0, Real fac, Real tau) {
 
-KOKKOS_INLINE_FUNCTION
-void GetCartesianFromRipple(Real &x, Real &y, Real w, Real v, Real A, Real k) {
-  // We do a 2D Newton-Raphson solve for the Cartesian coordinates. Since it follows that
-  // w \in [x-A, x+A], we know that x \in [w-2A, w+2A]. The same holds for y. Thus we can
-  // use these as bounds to keep the solver from diverging.
-  Real xlb = w - 2.0*A;
-  Real xub = w + 2.0*A;
-  Real ylb = v - 2.0*A;
-  Real yub = v + 2.0*A;
-  Real tol = 1e-15;
+//   Real a;
 
-  x = w;
-  y = v;
+//   a = 1.0 + fac*tau*log(1.0 + exp((t-t0)/tau));
 
-  Real fx = x - w - A*sin(k*M_PI*y);
-  Real fy = y - v - A*sin(k*M_PI*x);
-  int its = 0;
-  int max_its = 30;
-  while ((fabs(fx) > tol || fabs(fy) > tol) && its < max_its) {
-    // Auxiliary quantities needed for the root solve.
-    Real delx = A*k*M_PI*cos(k*M_PI*x);
-    Real dely = A*k*M_PI*cos(k*M_PI*y);
-    Real idet = 1.0/(1.0 - delx*dely);
+//   return a;
+// }
 
-    // Estimate the updated roots (J^-1 f)
-    x = x - (fx + dely*fy)*idet;
-    y = y - (fy + delx*fx)*idet;
-    // Limit the roots
-    x = (x < xlb) ? xlb : x;
-    x = (x > xub) ? xub : x;
-    y = (y < ylb) ? ylb : y;
-    y = (y > yub) ? yub : y;
+// KOKKOS_INLINE_FUNCTION
+// Real GetCartesianFromSnake(Real w, Real y, Real A, Real k) {
+//   return w + A*sin(k*M_PI*y);
+// }
 
-    // Update the function values
-    fx = x - w - A*sin(k*M_PI*y);
-    fy = y - v - A*sin(k*M_PI*x);
-  }
-  return;
-}
+// KOKKOS_INLINE_FUNCTION
+// void GetCartesianFromRipple(Real &x, Real &y, Real w, Real v, Real A, Real k) {
+//   // We do a 2D Newton-Raphson solve for the Cartesian coordinates. Since it follows that
+//   // w \in [x-A, x+A], we know that x \in [w-2A, w+2A]. The same holds for y. Thus we can
+//   // use these as bounds to keep the solver from diverging.
+//   Real xlb = w - 2.0*A;
+//   Real xub = w + 2.0*A;
+//   Real ylb = v - 2.0*A;
+//   Real yub = v + 2.0*A;
+//   Real tol = 1e-15;
 
-KOKKOS_INLINE_FUNCTION
-Real GetCartesianFromScrewball(Real u, Real a) {
-  // We define u = x*exp(-x^2/2a^2), so the transformation from u to x is not analytic.
-  // However, we restrict u s.t. u \in [0, a/sqrt(e)], so we also know that x \in [u, a].
-  // We thus define x as the solution to x - u*exp(x^2/2a^2) = 0.
+//   x = w;
+//   y = v;
 
-  // In the event that u = 0, we can return the exact solution.
-  if (u == 0.0 || u == -0.0) {
-    return 0.0;
-  }
+//   Real fx = x - w - A*sin(k*M_PI*y);
+//   Real fy = y - v - A*sin(k*M_PI*x);
+//   int its = 0;
+//   int max_its = 30;
+//   while ((fabs(fx) > tol || fabs(fy) > tol) && its < max_its) {
+//     // Auxiliary quantities needed for the root solve.
+//     Real delx = A*k*M_PI*cos(k*M_PI*x);
+//     Real dely = A*k*M_PI*cos(k*M_PI*y);
+//     Real idet = 1.0/(1.0 - delx*dely);
 
-  // Flip the sign of u if necessary. We can do this because u is an odd function.
-  Real sign = 1.0;
-  if (u < 0) {
-    sign = -1;
-    u = -u;
-  }
-  Real lb = u;
-  Real ub = a;
-  Real x = 0.5*(lb + ub);
-  Real gauss = exp(x*x/(2.0*a*a));
-  Real f = x - u*gauss;
-  Real tol = 1e-15;
-  int its = 0;
-  int max_its = 30;
-  while (fabs(f) > tol && its < max_its) {
-    // Newton iteration.
-    Real df = 1.0 - u*x/(a*a)*gauss;
-    x = x - f/df;
+//     // Estimate the updated roots (J^-1 f)
+//     x = x - (fx + dely*fy)*idet;
+//     y = y - (fy + delx*fx)*idet;
+//     // Limit the roots
+//     x = (x < xlb) ? xlb : x;
+//     x = (x > xub) ? xub : x;
+//     y = (y < ylb) ? ylb : y;
+//     y = (y > yub) ? yub : y;
 
-    // Use bisection if we would travel outside the bracket.
-    if (x < lb || x > ub) {
-      x = 0.5*(lb + ub);
-    }
-    // Check how well x satisfies f.
-    gauss = exp(x*x/(2.0*a*a));
-    f = x - u*gauss;
-    // Update the bracket.
-    if (f < 0) {
-      lb = x;
-    } else {
-      ub = x;
-    }
-    its++;
-  }
+//     // Update the function values
+//     fx = x - w - A*sin(k*M_PI*y);
+//     fy = y - v - A*sin(k*M_PI*x);
+//   }
+//   return;
+// }
 
-  return sign*x;
-}
+// KOKKOS_INLINE_FUNCTION
+// Real GetCartesianFromScrewball(Real u, Real a) {
+//   // We define u = x*exp(-x^2/2a^2), so the transformation from u to x is not analytic.
+//   // However, we restrict u s.t. u \in [0, a/sqrt(e)], so we also know that x \in [u, a].
+//   // We thus define x as the solution to x - u*exp(x^2/2a^2) = 0.
+
+//   // In the event that u = 0, we can return the exact solution.
+//   if (u == 0.0 || u == -0.0) {
+//     return 0.0;
+//   }
+
+//   // Flip the sign of u if necessary. We can do this because u is an odd function.
+//   Real sign = 1.0;
+//   if (u < 0) {
+//     sign = -1;
+//     u = -u;
+//   }
+//   Real lb = u;
+//   Real ub = a;
+//   Real x = 0.5*(lb + ub);
+//   Real gauss = exp(x*x/(2.0*a*a));
+//   Real f = x - u*gauss;
+//   Real tol = 1e-15;
+//   int its = 0;
+//   int max_its = 30;
+//   while (fabs(f) > tol && its < max_its) {
+//     // Newton iteration.
+//     Real df = 1.0 - u*x/(a*a)*gauss;
+//     x = x - f/df;
+
+//     // Use bisection if we would travel outside the bracket.
+//     if (x < lb || x > ub) {
+//       x = 0.5*(lb + ub);
+//     }
+//     // Check how well x satisfies f.
+//     gauss = exp(x*x/(2.0*a*a));
+//     f = x - u*gauss;
+//     // Update the bracket.
+//     if (f < 0) {
+//       lb = x;
+//     } else {
+//       ub = x;
+//     }
+//     its++;
+//   }
+
+//   return sign*x;
+// }
 
 //----------------------------------------------------------------------------------------
 //! \fn ProblemGenerator::UserProblem_()
@@ -136,10 +146,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   bool is_expanding = pin->GetOrAddBoolean("problem", "flrw", false);
   if (is_expanding) {
-    R_max0 = pin->GetOrAddReal("problem", "R_max0", 1.0);
-    v_max = pin->GetOrAddReal("problem", "v_max0", 1.0);
+    R_m = pin->GetOrAddReal("problem", "R_max0", 1.0);
+    v_m = pin->GetOrAddReal("problem", "v_max0", 1.0);
     t0 = pin->GetOrAddReal("problem", "t0", 0.0);
-    fac = v_max / R_max0;
+    fac = v_m / R_m;
     pmbp->padm->SetADMVariables = &SetADMVariablesToFLRW;
   }
 
@@ -189,69 +199,70 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   auto &size = pmbp->pmb->mb_size;
 
   // initialize Hydro variables ----------------------------------------------------------
-  if (pmbp->phydro != nullptr) {
-    auto &w0_ = pmbp->phydro->w0;
-    Real gm1 = pmbp->phydro->peos->eos_data.gamma - 1.0;
-    if (pmbp->pcoord->is_dynamical_relativistic) {
-      gm1 = 1.0; // DynGRMHD uses pressure, not energy.
-    }
-    par_for("pgen_blast1",DevExeSpace(),0,(pmbp->nmb_thispack-1),ks,ke,js,je,is,ie,
-    KOKKOS_LAMBDA(int m,int k,int j,int i) {
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      int nx1 = indcs.nx1;
-      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+  // if (pmbp->phydro != nullptr) {
+  //   auto &w0_ = pmbp->phydro->w0;
+  //   Real gm1 = pmbp->phydro->peos->eos_data.gamma - 1.0;
+  //   if (pmbp->pcoord->is_dynamical_relativistic) {
+  //     gm1 = 1.0; // DynGRMHD uses pressure, not energy.
+  //   }
+  //   par_for("pgen_blast1",DevExeSpace(),0,(pmbp->nmb_thispack-1),ks,ke,js,je,is,ie,
+  //   KOKKOS_LAMBDA(int m,int k,int j,int i) {
+  //     Real &x1min = size.d_view(m).x1min;
+  //     Real &x1max = size.d_view(m).x1max;
+  //     int nx1 = indcs.nx1;
+  //     Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
 
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      int nx2 = indcs.nx2;
-      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+  //     Real &x2min = size.d_view(m).x2min;
+  //     Real &x2max = size.d_view(m).x2max;
+  //     int nx2 = indcs.nx2;
+  //     Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-      int nx3 = indcs.nx3;
-      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+  //     Real &x3min = size.d_view(m).x3min;
+  //     Real &x3max = size.d_view(m).x3max;
+  //     int nx3 = indcs.nx3;
+  //     Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
-      Real den = dn_amb;
-      Real pres = pn_amb;
+  //     Real den = dn_amb;
+  //     Real pres = pn_amb;
 
-      Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
-      Real vel_x = 0.0;
-      Real vel_y = 0.0;
-      Real vel_z = 0.0;
+  //     Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+  //     Real vel_x = 0.0;
+  //     Real vel_y = 0.0;
+  //     Real vel_z = 0.0;
 
-      if (rad < rout) {
-        vel_x = v0 * x1v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
-        vel_y = v0 * x2v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
-        vel_z = v0 * x3v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
-        if (rad < rin) {
-          den *= drat;
-          pres *= prat;
-        } else {   // add smooth ramp in density
-          Real f = (rad-rin) / (rout-rin);
-          Real log_den = (1.0-f) * log(drat*dn_amb) + f * log(dn_amb);
-          den = exp(log_den);
-          Real log_pres = (1.0-f) * log(prat*pn_amb) + f * log(pn_amb);
-          pres = exp(log_pres);
-        }
-      }
+  //     if (rad < rout) {
+  //       vel_x = v0 * x1v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
+  //       vel_y = v0 * x2v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
+  //       vel_z = v0 * x3v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
+  //       if (rad < rin) {
+  //         den *= drat;
+  //         pres *= prat;
+  //       } else {   // add smooth ramp in density
+  //         Real f = (rad-rin) / (rout-rin);
+  //         Real log_den = (1.0-f) * log(drat*dn_amb) + f * log(dn_amb);
+  //         den = exp(log_den);
+  //         Real log_pres = (1.0-f) * log(prat*pn_amb) + f * log(pn_amb);
+  //         pres = exp(log_pres);
+  //       }
+  //     }
 
-      w0_(m,IDN,k,j,i) = den;
-      w0_(m,IVX,k,j,i) = vel_x;
-      w0_(m,IVY,k,j,i) = vel_y;
-      w0_(m,IVZ,k,j,i) = vel_z;
-      w0_(m,IEN,k,j,i) = pres/gm1;
-    });
+  //     w0_(m,IDN,k,j,i) = den;
+  //     w0_(m,IVX,k,j,i) = vel_x;
+  //     w0_(m,IVY,k,j,i) = vel_y;
+  //     w0_(m,IVZ,k,j,i) = vel_z;
+  //     w0_(m,IEN,k,j,i) = pres/gm1;
+  //   });
 
-    // Convert primitives to conserved
-    if (!pmbp->pcoord->is_dynamical_relativistic) {
-      pmbp->phydro->peos->PrimToCons(w0_, pmbp->phydro->u0, is, ie, js, je, ks, ke);
-    }
-  }  // End initialization Hydro variables
+  //   // Convert primitives to conserved
+  //   if (!pmbp->pcoord->is_dynamical_relativistic) {
+  //     pmbp->phydro->peos->PrimToCons(w0_, pmbp->phydro->u0, is, ie, js, je, ks, ke);
+  //   }
+  // }  // End initialization Hydro variables
 
   // initialize MHD variables ------------------------------------------------------------
   if (pmbp->pmhd != nullptr) {
     auto &w0_ = pmbp->pmhd->w0;
+    auto f = fac;
     Real gm1 = pmbp->pmhd->peos->eos_data.gamma - 1.0;
     if (pmbp->pcoord->is_dynamical_relativistic) {
       gm1 = 1.0; // DynGRMHD uses pressure, not energy.
@@ -296,11 +307,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real vel_x = 0.0; 
       Real vel_y = 0.0; 
       Real vel_z = 0.0;
+      
+      if (rad < rout) {
+        Real Gamma_0 = 1.0 / sqrt(1.0 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
+        // Real f = v_max / R_max0;
+        vel_x = v0 * x1v * Gamma_0 - x1v*f;
+        vel_y = v0 * x2v * Gamma_0 - x2v*f;
+        vel_z = v0 * x3v * Gamma_0 - x3v*f;
+      }
 
       if (rad < rout) {
-        vel_x = v0 * x1v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
-        vel_y = v0 * x2v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
-        vel_z = v0 * x3v / sqrt(1 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
         if (rad < rin) {
           den *= drat;
           pres *= prat;
@@ -363,12 +379,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
       Real y = x2f;
 
-      if (warp) {
-        y = GetCartesianFromScrewball(x2f, a_warp);
-      } else if (ripple) {
-        Real x;
-        GetCartesianFromRipple(x, y, x1f, x2f, A_snake, k_snake);
-      }
+      // if (warp) {
+      //   y = GetCartesianFromScrewball(x2f, a_warp);
+      // } else if (ripple) {
+      //   Real x;
+      //   GetCartesianFromRipple(x, y, x1f, x2f, A_snake, k_snake);
+      // }
 
       a3(m,k,j,i) = b_amb*y;
     });
