@@ -27,22 +27,11 @@
 #include "coordinates/cell_locations.hpp"
 
 namespace {
-  Real R_m;     // Maximum radius at t=t0.
-  Real v_m;      // Maximum speed.
+  Real h0;
   Real t0;
-  Real fac;
   void SetADMVariablesToFLRW(MeshBlockPack *pmbp);
 }
 
-// KOKKOS_INLINE_FUNCTION
-// Real a_factor(Real t, Real t0, Real fac, Real tau) {
-
-//   Real a;
-
-//   a = 1.0 + fac*tau*log(1.0 + exp((t-t0)/tau));
-
-//   return a;
-// }
 
 // KOKKOS_INLINE_FUNCTION
 // Real GetCartesianFromSnake(Real w, Real y, Real A, Real k) {
@@ -146,10 +135,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   bool is_expanding = pin->GetOrAddBoolean("problem", "flrw", false);
   if (is_expanding) {
-    R_m = pin->GetOrAddReal("problem", "R_max0", 1.0);
-    v_m = pin->GetOrAddReal("problem", "v_max0", 1.0);
+    h0 = pin->GetOrAddReal("problem", "h0", 1.0e-6);
     t0 = pin->GetOrAddReal("problem", "t0", 0.0);
-    fac = v_m / R_m;
     pmbp->padm->SetADMVariables = &SetADMVariablesToFLRW;
   }
 
@@ -262,7 +249,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // initialize MHD variables ------------------------------------------------------------
   if (pmbp->pmhd != nullptr) {
     auto &w0_ = pmbp->pmhd->w0;
-    auto f = fac;
     Real gm1 = pmbp->pmhd->peos->eos_data.gamma - 1.0;
     if (pmbp->pcoord->is_dynamical_relativistic) {
       gm1 = 1.0; // DynGRMHD uses pressure, not energy.
@@ -311,9 +297,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       if (rad < rout) {
         Real Gamma_0 = 1.0 / sqrt(1.0 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
         // Real f = v_max / R_max0;
-        vel_x = v0 * x1v * Gamma_0 - x1v*f;
-        vel_y = v0 * x2v * Gamma_0 - x2v*f;
-        vel_z = v0 * x3v * Gamma_0 - x3v*f;
+        vel_x = v0 * x1v * Gamma_0;
+        vel_y = v0 * x2v * Gamma_0;
+        vel_z = v0 * x3v * Gamma_0;
       }
 
       if (rad < rout) {
@@ -453,33 +439,32 @@ void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
   int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
 
   // We want to set the Minkowski space before t_0 and FLRW after. 
-  Real temp;
   Real a;
-  Real a2;
+  Real b;
 
-  if(t < t0) {
+  if (t<t0) {
     a = 1.0;
-    a2 = a*a;
-    temp = 0.0; 
+    b = 0.0;
   } else {
-    a = 1.0 + fac*(t-t0);
-    a2 = a*a;
-    temp = -a*fac;
+    a = 1.0 / (1.0 - h0*(t-t0));
+    b = a*h0;
   }
+ 
+  Real a2 = a*a;
 
   par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    // Real &x1min = size.d_view(m).x1min;
-    // Real &x1max = size.d_view(m).x1max;
-    // Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
 
-    // Real &x2min = size.d_view(m).x2min;
-    // Real &x2max = size.d_view(m).x2max;
-    // Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
 
-    // Real &x3min = size.d_view(m).x3min;
-    // Real &x3max = size.d_view(m).x3max;
-    // Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
     adm.g_dd(m,0,0,k,j,i) = a2;
     adm.g_dd(m,0,1,k,j,i) = 0.0;
@@ -488,17 +473,17 @@ void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
     adm.g_dd(m,1,2,k,j,i) = 0.0;
     adm.g_dd(m,2,2,k,j,i) = a2;
 
-    adm.vK_dd(m,0,0,k,j,i) = temp;
+    adm.vK_dd(m,0,0,k,j,i) = 0.0;
     adm.vK_dd(m,0,1,k,j,i) = 0.0;
     adm.vK_dd(m,0,2,k,j,i) = 0.0;
-    adm.vK_dd(m,1,1,k,j,i) = temp;
+    adm.vK_dd(m,1,1,k,j,i) = 0.0;
     adm.vK_dd(m,1,2,k,j,i) = 0.0;
-    adm.vK_dd(m,2,2,k,j,i) = temp;
+    adm.vK_dd(m,2,2,k,j,i) = 0.0;
 
-    adm.alpha(m,k,j,i) = 1.0;
-    adm.beta_u(m,0,k,j,i) = 0.0;
-    adm.beta_u(m,1,k,j,i) = 0.0;
-    adm.beta_u(m,2,k,j,i) = 0.0;
+    adm.alpha(m,k,j,i) = a;
+    adm.beta_u(m,0,k,j,i) = b*x1v;
+    adm.beta_u(m,1,k,j,i) = b*x2v;
+    adm.beta_u(m,2,k,j,i) = b*x3v;
   });
 }
 
