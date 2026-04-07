@@ -28,7 +28,6 @@
 
 namespace {
   Real h0;
-  Real t0;
   void SetADMVariablesToFLRW(MeshBlockPack *pmbp);
 }
 
@@ -136,7 +135,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   bool is_expanding = pin->GetOrAddBoolean("problem", "flrw", false);
   if (is_expanding) {
     h0 = pin->GetOrAddReal("problem", "h0", 1.0e-6);
-    t0 = pin->GetOrAddReal("problem", "t0", 0.0);
     pmbp->padm->SetADMVariables = &SetADMVariablesToFLRW;
   }
 
@@ -297,9 +295,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       if (rad < rout) {
         Real Gamma_0 = 1.0 / sqrt(1.0 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
         // Real f = v_max / R_max0;
-        vel_x = v0 * x1v * Gamma_0;
-        vel_y = v0 * x2v * Gamma_0;
-        vel_z = v0 * x3v * Gamma_0;
+        vel_x = Gamma_0 * v0 * x1v;
+        vel_y = Gamma_0 * v0 * x2v;
+        vel_z = Gamma_0 * v0 * x3v;    
       }
 
       if (rad < rout) {
@@ -442,15 +440,8 @@ void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
   Real a;
   Real b;
 
-  if (t<t0) {
-    a = 1.0;
-    b = 0.0;
-  } else {
-    a = 1.0 / (1.0 - h0*(t-t0));
-    b = a*h0;
-  }
- 
-  Real a2 = a*a;
+  a = 1.0 / (1.0 - h0*t);
+  b = a*h0;
 
   par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -466,12 +457,12 @@ void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
     Real &x3max = size.d_view(m).x3max;
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
-    adm.g_dd(m,0,0,k,j,i) = a2;
+    adm.g_dd(m,0,0,k,j,i) = a*a;
     adm.g_dd(m,0,1,k,j,i) = 0.0;
     adm.g_dd(m,0,2,k,j,i) = 0.0;
-    adm.g_dd(m,1,1,k,j,i) = a2;
+    adm.g_dd(m,1,1,k,j,i) = a*a;
     adm.g_dd(m,1,2,k,j,i) = 0.0;
-    adm.g_dd(m,2,2,k,j,i) = a2;
+    adm.g_dd(m,2,2,k,j,i) = a*a;
 
     adm.vK_dd(m,0,0,k,j,i) = 0.0;
     adm.vK_dd(m,0,1,k,j,i) = 0.0;
