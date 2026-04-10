@@ -133,14 +133,16 @@ namespace {
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   bool is_expanding = pin->GetOrAddBoolean("problem", "flrw", false);
-  if (is_expanding) {
-    h0 = pin->GetOrAddReal("problem", "h0", 1.0e-6);
+  Real vel_max = pin->GetReal("problem", "vel_max");
+  Real rout = pin->GetReal("problem", "outer_radius");
+
+  if (is_expanding) {  
+    h0 = vel_max/rout;
     pmbp->padm->SetADMVariables = &SetADMVariablesToFLRW;
   }
 
   if (restart) return;
 
-  Real rout = pin->GetReal("problem", "outer_radius");
   Real rin  = pin->GetReal("problem", "inner_radius");
   // values for neutrals (hydro fluid)
   Real pn_amb   = pin->GetOrAddReal("problem", "pn_amb", 1.0);
@@ -151,7 +153,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // ratios in homologous expansion (same for both ions and neutrals)
   Real prat = pin->GetReal("problem", "prat");
   Real drat = pin->GetOrAddReal("problem", "drat", 1.0);
-  Real v0 = pin->GetOrAddReal("problem", "v0", 0.25);
   Real b_amb = pin->GetOrAddReal("problem", "b_amb", 0.1);
   std::string coords = pin->GetOrAddString("problem", "coordinates", "cartesian");
   bool warp = false;
@@ -293,11 +294,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real vel_z = 0.0;
       
       if (rad < rout) {
-        Real Gamma_0 = 1.0 / sqrt(1.0 - SQR(v0*x1v) - SQR(v0*x2v) - SQR(v0*x3v));
-        // Real f = v_max / R_max0;
-        vel_x = Gamma_0 * v0 * x1v;
-        vel_y = Gamma_0 * v0 * x2v;
-        vel_z = Gamma_0 * v0 * x3v;    
+        Real Gamma_0 = 1.0 / sqrt(1.0 - SQR(vel_max*x1v / rout) - SQR(vel_max*x2v / rout) - SQR(vel_max*x3v / rout));
+        vel_x = Gamma_0 * vel_max * x1v / rout;
+        vel_y = Gamma_0 * vel_max * x2v / rout;
+        vel_z = Gamma_0 * vel_max * x3v / rout;
       }
 
       if (rad < rout) {
@@ -440,8 +440,8 @@ void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
   Real a;
   Real b;
 
-  a = 1.0 / (1.0 - h0*t);
-  b = a*h0;
+  a = exp(h0*t);
+  b = h0;
 
   par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
