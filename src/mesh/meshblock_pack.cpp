@@ -239,6 +239,16 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     ppart = nullptr;
   }
 
+   // (10) NUCLEAR
+  // Create nuclear reaction network / nuclear burning module.  Create tasklist.
+  if (pin->DoesBlockExist("nuclear")) {
+    pnuclear = new nuclear::Nuclear(this, pin);
+    nphysics++;
+    pnuclear->AssembleNuclearTasks(tl_map);
+  } else {
+    pnuclear = nullptr;
+  }
+
   // Check that at least ONE is requested and initialized.
   // Error if there are no physics blocks in the input file.
   if (nphysics == 0) {
