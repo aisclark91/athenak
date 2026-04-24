@@ -43,7 +43,7 @@ namespace nuclear {
             Real sources;
             Real inv_tau;
 
-            DvceArray4D<Real> s0_;
+            DvceArray4D<Real> y_eq;
             DvceArray5D<Real> w0_;
 
             if (!ismhd) {
