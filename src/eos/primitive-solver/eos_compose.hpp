@@ -80,6 +80,9 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
     nu_2DNR_eps_lim  = 1.e-7;
     nu_2DNR_n_max    = 100;
     nu_bis_n_cut_max = 8;
+
+    // Default for cold beta npe equilibrium solver
+    ye_eps_lim = 1.0e-7; 
   }
 
 /*
@@ -167,6 +170,44 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
     assert (m_initialized);
     return eval_at_nty(ECMUL, n, T, Y[0]);
   }
+
+  /// Calculate cold beta equilibrium, given n, T, and a vector ye with several guess values.
+KOKKOS_INLINE_FUNCTION Real ColdBetaEquilibrium(Real n, Real T, Real *Y_guess) const {
+    const int n_at = 10;
+    Real ye_eq;
+    Real vec_guess[n_at] = {
+      1.25e0;
+      1.10e0;
+      1.00e0;
+      0.90e0;
+      0.75e0;
+      0.60e0;
+      0.50e0;
+      0.25e0;
+      0.10e0;
+      0.01e0;
+    }
+
+    int ierr = 1;
+    int na = 0;
+
+    while(ierr!=0 && na<n_at) {
+      ye = Y_guess[na]*vec_guess[na];
+      ierr =  find_npe_beta_y_eq(n, T, ye);
+
+      na += 1;
+    }
+
+    // If succeed, return value, otherwise reset to epsilon value.
+    if(ierr==0){
+      ye_eq = ye;
+    } else {
+      ye_eq = ye_eps_lim;
+    }
+
+    return ye_eq;
+  }
+
 
   /// Calculate hot (neutrino trapped) beta equilibrium T_eq and Y_eq given n, e, and Yl
   KOKKOS_INLINE_FUNCTION int BetaEquilibriumTrapped(Real n, Real e, Real *Yl, Real &T_eq,
@@ -484,6 +525,86 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
     Real lt = m_log_t[ilo] - flo*(lthi - ltlo)/(fhi - flo);
     return exp2_(lt);
   }
+
+  KOKKOS_INLINE_FUNCTION int find_npe_beta_y_eq(Real n, Real T, Real &ye_guess) 
+      const {
+    Real min_ye = min_Y[0];
+    Real max_ye = max_Y[0];
+    Real ye = ye_guess;
+    Real error = 1.0;
+    const Real Ye_delta = 0.005;
+
+     // Newton's root to find y_eq
+    int max_iter = 100;
+    int iter{0};
+    int ierr;
+    while ((error >= ye_eps_lim) || (iter <= max_iter)) {              
+      mu_q  = ChargeChemicalPotential(nb, T, &ye);
+      mu_b  = BaryonChemicalPotential(nb, T, &ye);
+      mu_le = ElectronLeptonChemicalPotential(nb, T, &ye);
+      mu_p  = mu_b + mu_q;
+      mu_n  = mu_b;
+      mu_e  = mu_le - mu_q;
+
+      f = mu_n - mu_p - mu_e;
+        
+      Real ye1 = fmax(ye - ye_delta, min_ye);
+      mu_q1 = ChargeChemicalPotential(nb, T, &ye1);
+      mu_b1 = BaryonChemicalPotential(nb, T, &ye1);
+      mu_l1 = ElectronLeptonChemicalPotential(n, T, &ye1);
+      mu_p1 = mu_b1 + mu_q1;
+      mu_n1 = mu_b1;
+      mu_e1 = mu_l1 - mu_q1;
+      
+      Real ye2 = fmin(ye + ye_delta, max_ye);
+      mu_q2 = ChargeChemicalPotential(nb, T, &ye2);
+      mu_b2 = BaryonChemicalPotential(nb, T, &ye2);
+      mu_l2 = ElectronLeptonChemicalPotential(n, T, &ye2);
+      mu_p2 = mu_b2 + mu_q2;
+      mu_n2 = mu_b2;
+      mu_e2 = mu_l2 - mu_q2;
+
+      dmup_dye = (mu_p2 - mu_p1) / (ye2 - ye1);
+      dmun_dye = (mu_n2 - mu_n1) / (ye2 - ye1);
+      dmue_dye = (mu_e2 - mu_e1) / (ye2 - ye1);
+
+      if(isnan(dmup_dye) || isnan(dmun_dye) || isnan(dmue_dye)){
+        ierr = 1;
+        return ierr;
+      }
+
+      fprime = dmun_dye - dmup_dye - dmue_dye;
+
+      if(fprime==0.0) {
+        ierr = 1;
+        return ierr;
+      }
+      
+      delta = -f/fprime
+
+      //Move forward and enforce table boundaries:
+      ye_temp += delta;
+      ye_temp = fmin(fmax(ye_temp,min_ye),max_ye);
+
+      //Check if ye_temp is not a NaN
+      if isnan(ye_temp) {
+        ierr = 1;
+        return ierr;
+      }
+
+      error = fabs(ye_temp - ye);
+      ye = ye_temp;
+    }
+
+    if (iter <= max_iter) {
+      ierr = 0;
+    } else {
+      ierr = 1;  
+    }
+
+    return ierr;
+  }
+
 
   /// Low level functions for neutrino equilibrium, not intended for outside use
   KOKKOS_INLINE_FUNCTION int trapped_equilibrium_2DNR(Real n, Real e, Real Yle,
