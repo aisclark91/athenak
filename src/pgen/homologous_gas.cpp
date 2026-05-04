@@ -133,26 +133,33 @@ namespace {
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   bool is_expanding = pin->GetOrAddBoolean("problem", "flrw", false);
+  
+  // Velocity of the atmosphere layer
   Real vel_max = pin->GetReal("problem", "vel_max");
-  Real rout = pin->GetReal("problem", "outer_radius");
+
+  // offset radius
+  Real offset = pin->GetReal("problem", "offset");
+
+  // Blob Radius
+  Real rblob = pin->GetReal("problem", "rblob");
+
+  // value for the atmosphere layer
+  Real ratmos = pin->GetReal("problem", "ratmos");
 
   if (is_expanding) {  
-    h0 = vel_max/rout;
+    h0 = vel_max/ratmos + offset;
     pmbp->padm->SetADMVariables = &SetADMVariablesToFLRW;
   }
 
   if (restart) return;
 
-  Real rin  = pin->GetReal("problem", "inner_radius");
   // values for neutrals (hydro fluid)
-  Real pn_amb   = pin->GetOrAddReal("problem", "pn_amb", 1.0);
-  Real dn_amb   = pin->GetOrAddReal("problem", "dn_amb", 1.0);
+  Real p_out   = pin->GetOrAddReal("problem", "p_out", 1.0);
+  Real d_out   = pin->GetOrAddReal("problem", "d_out", 1.0);
   // values for ions (hydro fluid)
-  Real pi_amb   = pin->GetOrAddReal("problem", "pi_amb", 1.0);
-  Real di_amb   = pin->GetOrAddReal("problem", "di_amb", 1.0);
-  // ratios in homologous expansion (same for both ions and neutrals)
-  Real prat = pin->GetReal("problem", "prat");
-  Real drat = pin->GetOrAddReal("problem", "drat", 1.0);
+  Real p_in   = pin->GetOrAddReal("problem", "p_in", 1.0);
+  Real d_in   = pin->GetOrAddReal("problem", "d_in", 1.0);
+  // magnetic field strenght
   Real b_amb = pin->GetOrAddReal("problem", "b_amb", 0.1);
   std::string coords = pin->GetOrAddString("problem", "coordinates", "cartesian");
   bool warp = false;
@@ -285,33 +292,41 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       //   rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
       // }
 
-      Real den = di_amb;
-      Real pres = pi_amb;
+      Real den;
+      Real vel_x = 0.0;
+      Real vel_y = 0.0;
+      Real vel_z = 0.0;
+      Real pres;
 
       Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
-      Real vel_x = 0.0; 
-      Real vel_y = 0.0; 
-      Real vel_z = 0.0;
-      
-      if (rad < rout) {
-        Real Gamma_0 = 1.0 / sqrt(1.0 - SQR(vel_max*x1v / rout) - SQR(vel_max*x2v / rout) - SQR(vel_max*x3v / rout));
-        vel_x = Gamma_0 * vel_max * x1v / rout;
-        vel_y = Gamma_0 * vel_max * x2v / rout;
-        vel_z = Gamma_0 * vel_max * x3v / rout;
-      }
 
-      if (rad < rout) {
-        if (rad < rin) {
-          den *= drat;
-          pres *= prat;
-        } else {   // add smooth ramp in density
-          Real f = (rad-rin) / (rout-rin);
-          Real log_den = (1.0-f) * log(drat*di_amb) + f * log(di_amb);
-          den = exp(log_den);
-          Real log_pres = (1.0-f) * log(prat*pi_amb) + f * log(pi_amb);
-          pres = exp(log_pres);
-        }
-      }
+      if (rad<ratmos) {
+        vel_x = vel_max * x1v / ratmos;
+        vel_y = vel_max * x2v / ratmos;
+        vel_z = vel_max * x3v / ratmos;
+        Real Gamma_0 = 1.0 / sqrt(1.0 - SQR(vel_x) - SQR(vel_y) - SQR(vel_z));
+        vel_x *= Gamma_0;
+        vel_y *= Gamma_0;
+        vel_z *= Gamma_0;
+      } 
+     
+      if (rad <= rblob) {
+        den = d_in;
+        pres = p_in;
+      } else if (rad>rblob && rad<=ratmos){
+        Real log_k1 = (log(d_in)*log(ratmos) - log(d_out)*log(rblob))/(log(ratmos) - log(rblob)); 
+        Real n1 = -(log(d_out) - log(d_in))/(log(ratmos) - log(rblob));
+        Real log_rho = log_k1 - n1*log(rad);
+        den = exp(log_rho);
+
+        Real log_k2 = (log(p_in)*log(ratmos) - log(p_out)*log(rblob))/(log(ratmos) - log(rblob)); 
+        Real n2 = -(log(p_out) - log(p_in))/(log(ratmos) - log(rblob));
+        Real log_p = log_k2 - n2*log(rad);
+        pres = exp(log_p);
+      } else {
+        den = d_out;
+        pres = p_out;
+      }      
 
       w0_(m,IDN,k,j,i) = den;
       w0_(m,IVX,k,j,i) = vel_x;
