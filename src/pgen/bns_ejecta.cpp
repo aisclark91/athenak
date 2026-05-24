@@ -25,6 +25,7 @@
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "coordinates/adm.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "units/units.hpp"
 
 namespace {
   Real h0;
@@ -40,17 +41,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   bool is_expanding = pin->GetOrAddBoolean("problem", "flrw", false);
   
-  // Velocity of the atmosphere layer
+  // Maximum velocity of the ejecta
   Real vmax = pin->GetReal("problem", "vmax");
 
-  // offset radius
-  Real offset = pin->GetOrAddReal("problem", "offset", 0.0);
-
-  // Blob Radius
-  Real rblob = pin->GetReal("problem", "rblob");
-
-  // value for the atmosphere layer
+  // This r_{m,0}
   Real rmax = pin->GetReal("problem", "rmax");
+
+  // Expanding offset
+  Real offset = pin->GetOrAddReal("problem", "offset", 0.0);
 
   if (is_expanding) {  
     h0 = vmax/rmax + offset;
@@ -59,29 +57,35 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   if (restart) return;
 
+  // Central Engine Radius
+  Real r0 = pin->GetReal("problem", "r0");
+
+
   // values for neutrals (hydro fluid)
-  Real p_out   = pin->GetOrAddReal("problem", "p_out", 1.0);
-  Real d_out   = pin->GetOrAddReal("problem", "d_out", 1.0);
-  // values for ions (hydro fluid)
-  Real p_in   = pin->GetOrAddReal("problem", "p_in", 1.0);
-  Real d_in   = pin->GetOrAddReal("problem", "d_in", 1.0);
-  // whether to use a power-law or exponential-law tail
-  bool tail_power = pin->GetOrAddBoolean("problem", "tail_power", false);
-  Real n;
+  Real d_ejecta   = pin->GetOrAddReal("problem", "d_ejecta", 1.0);
+  Real d_ism   = pin->GetOrAddReal("problem", "d_ism", 1.0);
+  Real m_ejecta   = pin->GetOrAddReal("problem", "m_ejecta", 1.0);
+  Real k_eff   = pin->GetOrAddReal("problem", "k_eff", 1.0);
+
+  // whether to use a power-law, exponential-law or constant density tail
+  std::string ism_dep = pin->GetOrAddString("problem", "ism_dep", "constant");
+  bool power_law = (ism_dep.compare("power_law") == 0);
+  bool exponential = (ism_dep.compare("exponential") == 0);
+  bool constant = (ism_dep.compare("constant") == 0);
+  if (!power_law && !exponential && !constant) {
+    std::cout << "Defaulting to constant" << std::endl;
+    constant = true;
+  }
+
+  Real n_ism;
   Real tau;
   // Select the tail parameters based on the choice of tail type
-  if (tail_power) {
-    n = pin->GetOrAddReal("problem", "n", 3.0);
-  } else {
+  if (power_law) {
+    n_ism = pin->GetOrAddReal("problem", "n_ism", 3.0);
+  } else if (exponential) {
     tau = pin->GetOrAddReal("problem", "tau", 1.0);
   }
 
-  // if (n && tau) {
-  //   std::cout << 
-  //   "### FATAL ERROR: Tail parameters n and tau cannot both be set. Please set one or the other." 
-  //   << std::endl;
-  //   exit(EXIT_FAILURE);
-  // }
   // magnetic field strenght
   Real b_amb = pin->GetOrAddReal("problem", "b_amb", 0.1);
 
@@ -95,10 +99,14 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // initialize MHD variables ------------------------------------------------------------
   if (pmbp->pmhd != nullptr) {
     auto &w0_ = pmbp->pmhd->w0;
-    Real gm1 = pmbp->pmhd->peos->eos_data.gamma - 1.0;
+    Real gamma = pmbp->pmhd->peos->eos_data.gamma;
+    Real gm1 = gamma - 1.0;
     if (pmbp->pcoord->is_dynamical_relativistic) {
       gm1 = 1.0; // DynGRMHD uses pressure, not energy.
     }
+
+    // We will consider gaussian units: c=1, [M] = g, [L]=cm.
+
     par_for("pgen_blast1",DevExeSpace(),0,(pmbp->nmb_thispack-1),ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m,int k,int j,int i) {
       Real &x1min = size.d_view(m).x1min;
@@ -116,9 +124,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       int nx3 = indcs.nx3;
       Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
-      Real den;
-      Real pres;
-
       Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
 
       Real vel_x;
@@ -126,7 +131,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real vel_z;
       Real Gamma0;
 
-      if (rad <=rblob) {
+      if (rad < rmax) {
         vel_x = vmax * x1v / rmax;
         vel_y = vmax * x2v / rmax;
         vel_z = vmax * x3v / rmax;
@@ -135,40 +140,36 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
         vel_y *= Gamma0;
         vel_z *= Gamma0;
       } else {
-        vel_x = vmax * x1v / rmax;
-        vel_y = vmax * x2v / rmax;
-        vel_z = vmax * x3v / rmax;
-        Gamma0 = 1.0 / sqrt(1.0 - SQR(vmax*rblob/rmax));
-        vel_x = Gamma0 * vel_x;
-        vel_y = Gamma0 * vel_y;
-        vel_z = Gamma0 * vel_z;
+        vel_x = 0.0;
+        vel_y = 0.0;
+        vel_z = 0.0; 
       } 
 
-      if (tail_power) {
-        if (rad <= rblob) {
-          den = d_in;
-          pres = p_in;
-        } else {
-          Real log_k1 = log(d_out) + n*log(rblob); 
-          Real log_rho = log_k1 - n*log(rad);
-          den = exp(log_rho);
-
-          Real log_k2 = log(p_out) + n*log(rblob);
-          Real log_p = log_k2 - n*log(rad);
-          pres = exp(log_p);
-        }
+      Real den;
+      Real rho_0 = m_ejecta/(4*M_PI*r0*r0);
+      rho_0 *= (vmax / rmax) / (asin(vmax) - asin(vmax*r0/rmax)); 
+      
+      if (rad < r0) {
+        den = rho_0;
+      } else if (rad >= r0 && rad < rmax) {
+        den = rho_0 * (r0*r0)/(rad*rad);
       } else {
-        if (rad <= rblob) {
-          den = d_in;
-          pres = p_in;
-        } else {
-          Real log_rho = log(d_out) - (rad-rblob)/tau;
+        if (power_law) {
+          Real log_k1  = log(d_ism) + n_ism*log(rmax);
+          Real log_rho = log_k1 - n_ism*log(rad);
           den = exp(log_rho);
-
-          Real log_p = log(p_out) - (rad-rblob)/tau;
-          pres = exp(log_p);
+        } else if (exponential) {
+          Real log_rho = log(d_ism) - (rad-rmax)/tau;
+          den = exp(log_rho);
+        } else if (exponential) {
+          Real log_rho = log(d_ism) - (rad-rmax)/tau;
+          den = exp(log_rho);
+        } else if (constant) {
+          den = d_ism;
         }
       }
+
+      Real pres = k_eff * pow(den, gamma); 
 
       w0_(m,IDN,k,j,i) = den;
       w0_(m,IVX,k,j,i) = vel_x;
