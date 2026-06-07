@@ -61,7 +61,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     pmbp->padm->SetADMVariables = &SetADMVariablesToFLRW;
   }
 
-  gamma = pmbp->pmhd->peos->eos_data.gamma;
+  EOS_Data &eos = pmbp->pmhd->peos->eos_data;
+  gamma = eos.gamma;
   r0 = pin->GetReal("problem", "r0");
 
   theta_j    = pin->GetOrAddReal("problem", "theta_j", 1.0);
