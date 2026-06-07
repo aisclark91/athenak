@@ -20,18 +20,24 @@
 #include "athena.hpp"
 #include "mesh/mesh.hpp"
 #include "eos/eos.hpp"
-#include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "coordinates/adm.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "units/units.hpp"
 
-namespace {
-  Real h0;
-  void SetADMVariablesToFLRW(MeshBlockPack *pmbp);
-}
+Real r0;
+Real h0;
+Real Lj;
+Real v_r;
+Real v_phi;
+Real Gamma_inf;
+Real theta_j;
+Real gamma;
+Real t_eng;
 
+void SetADMVariablesToFLRW(MeshBlockPack *pmbp);
+void SetCentralEngine(Mesh* pm, const Real bdt);
 
 //----------------------------------------------------------------------------------------
 //! \fn ProblemGenerator::UserProblem_()
@@ -55,18 +61,27 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     pmbp->padm->SetADMVariables = &SetADMVariablesToFLRW;
   }
 
+  gamma = pmbp->pmhd->peos->eos_data.gamma;
+  r0 = pin->GetReal("problem", "r0");
+
+  theta_j    = pin->GetOrAddReal("problem", "theta_j", 1.0);
+  Lj = pin->GetOrAddReal("problem", "Lj", 0.0);
+  v_r = pin->GetOrAddReal("problem", "v_r", 1.0);
+  v_phi = pin->GetOrAddReal("problem", "v_phi", 1.0);
+  Gamma_inf = pin->GetOrAddReal("problem", "Gamma_inf", 1.0);
+  t_eng = pin->GetOrAddReal("problem", "t_eng", 1.0);
+
+  user_srcs_func = &SetCentralEngine;
+
   if (restart) return;
 
   // Central Engine Radius
-  Real r0 = pin->GetReal("problem", "r0");
 
-
-  // values for neutrals (hydro fluid)
   Real d_ejecta   = pin->GetOrAddReal("problem", "d_ejecta", 1.0);
-  Real d_ism   = pin->GetOrAddReal("problem", "d_ism", 1.0);
+  Real d_ism      = pin->GetOrAddReal("problem", "d_ism", 1.0);
   Real m_ejecta   = pin->GetOrAddReal("problem", "m_ejecta", 1.0);
-  Real k_eff   = pin->GetOrAddReal("problem", "k_eff", 1.0);
-
+  Real temp      = pin->GetOrAddReal("problem", "temp", 1.0);
+ 
   // whether to use a power-law, exponential-law or constant density tail
   std::string ism_dep = pin->GetOrAddString("problem", "ism_dep", "constant");
   bool power_law = (ism_dep.compare("power_law") == 0);
@@ -78,12 +93,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   Real n_ism;
-  Real tau;
+  Real tau_ism;
   // Select the tail parameters based on the choice of tail type
   if (power_law) {
     n_ism = pin->GetOrAddReal("problem", "n_ism", 3.0);
   } else if (exponential) {
-    tau = pin->GetOrAddReal("problem", "tau", 1.0);
+    tau_ism = pin->GetOrAddReal("problem", "tau_ism", 1.0);
   }
 
   // magnetic field strenght
@@ -99,7 +114,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // initialize MHD variables ------------------------------------------------------------
   if (pmbp->pmhd != nullptr) {
     auto &w0_ = pmbp->pmhd->w0;
-    Real gamma = pmbp->pmhd->peos->eos_data.gamma;
     Real gm1 = gamma - 1.0;
     if (pmbp->pcoord->is_dynamical_relativistic) {
       gm1 = 1.0; // DynGRMHD uses pressure, not energy.
@@ -147,29 +161,26 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
       Real den;
       Real rho_0 = m_ejecta/(4*M_PI*r0*r0);
-      rho_0 *= (vmax / rmax) / (asin(vmax) - asin(vmax*r0/rmax)); 
+      rho_0 *= 1.0/(rmax*(1.0 - r0/rmax)); 
       
       if (rad < r0) {
         den = rho_0;
       } else if (rad >= r0 && rad < rmax) {
-        den = rho_0 * (r0*r0)/(rad*rad);
+        den = rho_0 * SQR(r0/rad);
       } else {
         if (power_law) {
           Real log_k1  = log(d_ism) + n_ism*log(rmax);
           Real log_rho = log_k1 - n_ism*log(rad);
           den = exp(log_rho);
         } else if (exponential) {
-          Real log_rho = log(d_ism) - (rad-rmax)/tau;
-          den = exp(log_rho);
-        } else if (exponential) {
-          Real log_rho = log(d_ism) - (rad-rmax)/tau;
+          Real log_rho = log(d_ism) - (rad-rmax)/tau_ism;
           den = exp(log_rho);
         } else if (constant) {
           den = d_ism;
         }
       }
 
-      Real pres = k_eff * pow(den, gamma); 
+      Real pres = temp*den; 
 
       w0_(m,IDN,k,j,i) = den;
       w0_(m,IVX,k,j,i) = vel_x;
@@ -272,60 +283,165 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   return;
 }
 
-namespace {
+
 //----------------------------------------------------------------------------------------
-  void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
-    const Real t = pmbp->pmesh->time;
-    auto &adm = pmbp->padm->adm;
-    auto &size = pmbp->pmb->mb_size;
-    auto &indcs = pmbp->pmesh->mb_indcs;
-    int &ng = indcs.ng;
-    int is = indcs.is, js = indcs.js, ks = indcs.ks;
-    int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
-    int nmb = pmbp->nmb_thispack;
-    int n1 = indcs.nx1 + 2*ng;
-    int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
-    int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
+void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
+  const Real t = pmbp->pmesh->time;
+  auto &adm = pmbp->padm->adm;
+  auto &size = pmbp->pmb->mb_size;
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  int &ng = indcs.ng;
+  int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
+  int nmb = pmbp->nmb_thispack;
+  int n1 = indcs.nx1 + 2*ng;
+  int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
+  int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
 
-    // We want to set the Minkowski space before t_0 and FLRW after. 
-    Real a;
-    Real b;
+  // We want to set the Minkowski space before t_0 and FLRW after. 
+  Real a;
+  Real b;
 
-    a = exp(h0*t);
-    b = h0;
+  a = exp(h0*t);
+  b = h0;
 
-    par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
-    KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+  par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
 
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
 
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
-      adm.g_dd(m,0,0,k,j,i) = a*a;
-      adm.g_dd(m,0,1,k,j,i) = 0.0;
-      adm.g_dd(m,0,2,k,j,i) = 0.0;
-      adm.g_dd(m,1,1,k,j,i) = a*a;
-      adm.g_dd(m,1,2,k,j,i) = 0.0;
-      adm.g_dd(m,2,2,k,j,i) = a*a;
+    adm.g_dd(m,0,0,k,j,i) = a*a;
+    adm.g_dd(m,0,1,k,j,i) = 0.0;
+    adm.g_dd(m,0,2,k,j,i) = 0.0;
+    adm.g_dd(m,1,1,k,j,i) = a*a;
+    adm.g_dd(m,1,2,k,j,i) = 0.0;
+    adm.g_dd(m,2,2,k,j,i) = a*a;
 
-      adm.vK_dd(m,0,0,k,j,i) = 0.0;
-      adm.vK_dd(m,0,1,k,j,i) = 0.0;
-      adm.vK_dd(m,0,2,k,j,i) = 0.0;
-      adm.vK_dd(m,1,1,k,j,i) = 0.0;
-      adm.vK_dd(m,1,2,k,j,i) = 0.0;
-      adm.vK_dd(m,2,2,k,j,i) = 0.0;
+    adm.vK_dd(m,0,0,k,j,i) = 0.0;
+    adm.vK_dd(m,0,1,k,j,i) = 0.0;
+    adm.vK_dd(m,0,2,k,j,i) = 0.0;
+    adm.vK_dd(m,1,1,k,j,i) = 0.0;
+    adm.vK_dd(m,1,2,k,j,i) = 0.0;
+    adm.vK_dd(m,2,2,k,j,i) = 0.0;
 
-      adm.alpha(m,k,j,i) = a;
-      adm.beta_u(m,0,k,j,i) = b*x1v;
-      adm.beta_u(m,1,k,j,i) = b*x2v;
-      adm.beta_u(m,2,k,j,i) = b*x3v;
-    });
-  }
-} 
+    adm.alpha(m,k,j,i) = a;
+    adm.beta_u(m,0,k,j,i) = b*x1v;
+    adm.beta_u(m,1,k,j,i) = b*x2v;
+    adm.beta_u(m,2,k,j,i) = b*x3v;
+  });
+}
+
+void SetCentralEngine(Mesh* pm, const Real beta_dt) {
+  // This is where we would set the source terms for the central engine, if we wanted to.
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  const Real t = pmbp->pmesh->time;
+  Real tau = pmbp->pmesh->dt;
+
+  if (t > t_eng) return;
+  
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  int &ng = indcs.ng;
+  int is = indcs.is;
+  int js = indcs.js;
+  int ks = indcs.ks;
+  int ie = indcs.ie;
+  int je = indcs.je;
+  int ke = indcs.ke;
+  int nmb1 = pmbp->nmb_thispack - 1;
+  auto &size = pmbp->pmb->mb_size;
+  auto &adm = pmbp->padm->adm;
+
+  int ncells1 = indcs.nx1 + 2*(indcs.ng);
+  int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+  int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+  int nmb = pmbp->nmb_thispack;
+
+  DvceArray5D<Real> u0 = pmbp->pmhd->u0;
+  par_for("central_engine", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    
+    Real &x1min = size.d_view(m).x1min;
+    Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+    Real &x3min = size.d_view(m).x3min;
+    Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+    Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+    Real r_cil = sqrt(SQR(x1v) + SQR(x2v));
+
+    Real g3d[NSPMETRIC] = {adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
+                           adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
+                           adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i)};
+
+    const Real& alpha = adm.alpha(m, k, j, i);
+
+    Real detg = adm::SpatialDet(g3d[S11], g3d[S12], g3d[S13],
+                                g3d[S22], g3d[S23], g3d[S33]);
+    Real vol = sqrt(detg);
+
+    Real den;
+    Real wvx;
+    Real wvy;
+    Real wvz;
+    Real wv_x;
+    Real wv_y;
+    Real wv_z;
+    Real pres;
+
+    Real Gamma0 = 1.0 / sqrt(1.0 - (SQR(v_r) + SQR(v_phi)));
+    Real h = Gamma_inf/Gamma0;
+    
+    if (rad > 0 && rad <= r0/alpha) {
+      Real theta = acos(x3v/rad);
+      if (theta < theta_j) {
+        den = Lj/(4*M_PI*SQR(r0)*v_r*SQR(Gamma0)*h);
+        if (r_cil == 0) {
+          wvx = 0.0;
+          wvy = 0.0;
+          wvz = Gamma0 * (v_r*x3v/rad)/alpha;
+        } else {
+          wvx = Gamma0 * (v_r*x1v/rad - v_phi*x2v/r_cil)/alpha;
+          wvy = Gamma0 * (v_r*x2v/rad + v_phi*x1v/r_cil)/alpha;
+          wvz = Gamma0 * (v_r*x3v/rad)/alpha;
+        }
+        Real v[3] = {wvx, wvy, wvz};
+        Real v2 = Primitive::SquareVector(v, g3d);
+        Real w = sqrt(1.0 + v2); 
+
+        wv_x = g3d[S11]*wvx + g3d[S12]*wvy + g3d[S13]*wvz;
+        wv_y = g3d[S12]*wvx + g3d[S22]*wvy + g3d[S23]*wvz;
+        wv_z = g3d[S13]*wvx + g3d[S23]*wvy + g3d[S33]*wvz;
+       
+        pres = (gamma - 1.0)/gamma * (h - 1.0) * den;
+
+        Real u0_den = u0(m,IDN,k,j,i);
+        Real u0_mom1 = u0(m,IM1,k,j,i);
+        Real u0_mom2 = u0(m,IM2,k,j,i);
+        Real u0_mom3 = u0(m,IM3,k,j,i);
+        Real u0_tau = u0(m,IEN,k,j,i);
+
+        u0(m,IDN,k,j,i) += -alpha*vol*beta_dt*(u0_den - vol*den*w)/tau;
+        u0(m,IM1,k,j,i) += -alpha*vol*beta_dt*(u0_mom1 - vol*den*h*w*wv_x)/tau;
+        u0(m,IM2,k,j,i) += -alpha*vol*beta_dt*(u0_mom2 - vol*den*h*w*wv_y)/tau;
+        u0(m,IM3,k,j,i) += -alpha*vol*beta_dt*(u0_mom3 - vol*den*h*w*wv_z)/tau;
+        u0(m,IEN,k,j,i) += -alpha*vol*beta_dt*(u0_tau - vol*(den*h*w*w - pres - den*w))/tau;
+      }
+    }
+  });
+  return;
+}
