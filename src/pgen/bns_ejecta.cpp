@@ -359,12 +359,12 @@ namespace {
     int nmb1 = pmbp->nmb_thispack - 1;
     auto &size = pmbp->pmb->mb_size;
     auto &adm = pmbp->padm->adm;
-    DvceArray5D<Real> u0;
+    
 
     if (pmbp->pmhd != nullptr) {
       EOS_Data &eos = pmbp->pmhd->peos->eos_data;
       Real gamma = eos.gamma;
-      u0 = pmbp->pmhd->u0;
+      DvceArray5D<Real> &u0 = pmbp->pmhd->u0;
 
       const Real Lj_1 = Lj;
       const Real v_r_1 = v_r;
