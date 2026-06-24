@@ -26,6 +26,56 @@
 #include "coordinates/cell_locations.hpp"
 #include "units/units.hpp"
 
+KOKKOS_INLINE_FUNCTION
+Real Lengthfraction(Real a1,Real a2,Real b, Real c, Real R) {
+  Real epsilon_frac = 0.0;
+  if (R*R - b*b - c*c > 0) {
+    Real s1 = (-a1 + sqrt(R*R - b*b - c*c))/(a2-a1);
+    Real s2 = (-a1 - sqrt(R*R - b*b - c*c))/(a2-a1);
+    Real smax = Kokkos::max(s1, s2);
+    Real smin = Kokkos::min(s1, s2);
+    if (smax > 1.0) {
+      smax = 1.0;
+    }
+    if (smin < 0.0) {
+      smin = 0.0;
+    }
+    epsilon_frac = Kokkos::abs(smax - smin);
+  } else {
+    epsilon_frac = 0.0;
+  }
+  return epsilon_frac;
+}
+
+KOKKOS_INLINE_FUNCTION
+Real CalcVolFraction(Real x1min, Real x1max, Real x2min, Real x2max, Real x3min, Real x3max,
+                      Real R) {
+  // This is a helper function to compute the volume fraction of a cell that is filled with ejecta,
+  // at the boundary between the ejecta and the ISM. We assume that the ejecta is a sphere of radius R, and that
+  // the cell is a rectangular box defined by the limits x1min, x1max, x2min, x2max, x3min, x3max. 
+  // We will assume that the center of the ejecta is at the origin, so the sphere is defined by the equation 
+  // x1^2 + x2^2 + x3^2 = R^2. We will compute the volume fraction of the cell that is inside the sphere.
+  Real epsilon_frac = 0.0;
+
+  epsilon_frac += Lengthfraction(x2min, x2max, x1min, x3min, R);
+  epsilon_frac += Lengthfraction(x1min, x1max, x2min, x3min, R);
+  epsilon_frac += Lengthfraction(x2min, x2max, x1max, x3min, R);
+  epsilon_frac += Lengthfraction(x1min, x1max, x2max, x3min, R);
+
+  epsilon_frac += Lengthfraction(x2min, x2max, x1min, x3max, R);
+  epsilon_frac += Lengthfraction(x1min, x1max, x2min, x3max, R);
+  epsilon_frac += Lengthfraction(x2min, x2max, x1max, x3max, R);
+  epsilon_frac += Lengthfraction(x1min, x1max, x2max, x3max, R);
+
+  epsilon_frac += Lengthfraction(x3min, x3max, x1min, x2min, R);
+  epsilon_frac += Lengthfraction(x3min, x3max, x1max, x2min, R);
+  epsilon_frac += Lengthfraction(x3min, x3max, x1max, x2max, R);
+  epsilon_frac += Lengthfraction(x3min, x3max, x1min, x2max, R);
+
+  epsilon_frac /= 12.0;
+  return epsilon_frac;
+}
+
 namespace {
   Real h0;
   Real t_eng;
@@ -47,23 +97,22 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   bool is_expanding = pin->GetOrAddBoolean("problem", "flrw", false);
   
-  // Maximum velocity of the ejecta
+  // Maximum velocity of the expansion
   Real vmax = pin->GetReal("problem", "vmax");
 
-  // This r_{m,0}
+  // Maximum radius of the expansion
   Real rmax = pin->GetReal("problem", "rmax");
 
-  // Expanding offset
-  Real offset = pin->GetOrAddReal("problem", "offset", 0.0);
-
   if (is_expanding) {  
-    h0 = vmax/rmax + offset;
+    h0 = vmax/rmax;
     if (pmbp->padm != nullptr) {
       pmbp->padm->SetADMVariables = &SetADMVariablesToFLRW;
     }
   } else {
     h0 = 0.0;
   }
+
+  // Central Engine Radius:
 
   r0        = pin->GetReal("problem", "r0");
   theta_j   = pin->GetReal("problem", "theta_j");
@@ -77,8 +126,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   if (restart) return;
 
-  // Central Engine Radius
+  // Ejecta parameters:
 
+  Real r_ejecta   = pin->GetOrAddReal("problem", "r_ejecta", 1.0);
+  Real v_ejecta   = pin->GetOrAddReal("problem", "v_ejecta", 1.0);
   Real d_ejecta   = pin->GetOrAddReal("problem", "d_ejecta", 1.0);
   Real d_ism      = pin->GetOrAddReal("problem", "d_ism", 1.0);
   Real m_ejecta   = pin->GetOrAddReal("problem", "m_ejecta", 1.0);
@@ -123,8 +174,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     }
     // We will consider: c=1, [M] = g, [L]=km.
     const Real m_ejecta_1 = m_ejecta;
+    const Real r_ejecta_1 = r_ejecta;
     const Real r0_1 = r0;
     auto& w0_ = pmbp->pmhd->w0;
+
     par_for("pgen_blast1",DevExeSpace(),0,(pmbp->nmb_thispack-1),ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m,int k,int j,int i) {
       Real &x1min = size.d_view(m).x1min;
@@ -149,10 +202,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real vel_z;
       Real Gamma0;
 
-      if (rad < rmax) {
-        vel_x = vmax * x1v / rmax;
-        vel_y = vmax * x2v / rmax;
-        vel_z = vmax * x3v / rmax;
+      if (rad < r_ejecta_1) {
+        vel_x = v_ejecta * x1v / r_ejecta_1;
+        vel_y = v_ejecta * x2v / r_ejecta_1;
+        vel_z = v_ejecta * x3v / r_ejecta_1;
         Gamma0 = 1.0 / sqrt(1.0 - SQR(vel_x) - SQR(vel_y) - SQR(vel_z));
         vel_x *= Gamma0;
         vel_y *= Gamma0;
@@ -165,19 +218,19 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
       Real den;
       Real rho_0 = m_ejecta_1/(4*M_PI*r0_1*r0_1);
-      rho_0 *= 1.0/(rmax*(1.0 - r0_1/rmax)); 
+      rho_0 *= 1.0/(r_ejecta_1*(1.0 - r0_1/r_ejecta_1)); 
       
       if (rad < r0_1) {
-        den = d_ism;
-      } else if (rad >= r0_1 && rad < rmax) {
+        den = rho_0;
+      } else if (rad >= r0_1 && rad < r_ejecta_1) {
         den = rho_0 * SQR(r0_1/rad);
       } else {
         if (power_law) {
-          Real log_k1  = log(d_ism) + n_ism*log(rmax);
+          Real log_k1  = log(d_ism) + n_ism*log(r_ejecta_1);
           Real log_rho = log_k1 - n_ism*log(rad);
           den = exp(log_rho);
         } else if (exponential) {
-          Real log_rho = log(d_ism) - (rad-rmax)/tau_ism;
+          Real log_rho = log(d_ism) - (rad-r_ejecta_1)/tau_ism;
           den = exp(log_rho);
         } else if (constant) {
           den = d_ism;
@@ -298,7 +351,7 @@ namespace {
     int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
     int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
 
-    // We want to set the Minkowski space before t_0 and FLRW after. 
+    // Set FLRW metric variables for the current mesh time.
     Real a;
     Real b;
 
@@ -349,7 +402,6 @@ namespace {
     if (t > t_eng) return;
     
     auto &indcs = pmbp->pmesh->mb_indcs;
-    int &ng = indcs.ng;
     int is = indcs.is;
     int js = indcs.js;
     int ks = indcs.ks;
@@ -388,6 +440,9 @@ namespace {
         Real &x3max = size.d_view(m).x3max;
         Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
+        Real rad_l = sqrt(SQR(x1min) + SQR(x2min) + SQR(x3min));
+        Real rad_r = sqrt(SQR(x1max) + SQR(x2max) + SQR(x3max));
+
         Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
         Real r_cil = sqrt(SQR(x1v) + SQR(x2v));
 
@@ -410,22 +465,31 @@ namespace {
         Real wv_z;
         Real pres;
 
-        Real Gamma0 = 1.0 / sqrt(1.0 - (SQR(v_r_1) + SQR(v_phi_1)));
-        Real h = Gamma_inf_1/Gamma0;
+        Real Gamma_l = 1.0 / sqrt(1.0 - (SQR(v_r_1) + SQR(v_phi_1)));
+        Real h = Gamma_inf_1/Gamma_l;
         
         if (rad > 0 && rad <= r0_1/alpha) {
+          Real epsilon_frac = 1.0;
+          if (rad_l < r0_1/alpha && rad_r > r0_1/alpha) {
+            epsilon_frac = CalcVolFraction(x1min, x1max, x2min, x2max, x3min, x3max, r0_1);
+          }
+
           Real theta = acos(x3v/rad);
-          if (theta < theta_j_1) {
-            den = Lj_1/(4*M_PI*SQR(r0_1)*v_r_1*SQR(Gamma0)*h);
+          Real theta_min = M_PI - theta_j_1;
+          if ((theta < theta_j_1) || (theta > theta_min)) {
+            den = Lj_1/(4*M_PI*SQR(r0_1)*v_r_1*SQR(Gamma_l)*h);
             if (r_cil == 0) {
               wvx = 0.0;
               wvy = 0.0;
-              wvz = Gamma0 * (v_r_1*x3v/rad)/alpha;
+              wvz = Gamma_l * (v_r_1*x3v/rad)/alpha;
             } else {
-              wvx = Gamma0 * (v_r_1*x1v/rad - v_phi_1*x2v/r_cil)/alpha;
-              wvy = Gamma0 * (v_r_1*x2v/rad + v_phi_1*x1v/r_cil)/alpha;
-              wvz = Gamma0 * (v_r_1*x3v/rad)/alpha;
+              wvx = Gamma_l * (v_r_1*x1v/rad - v_phi_1*x2v/r_cil)/alpha;
+              wvy = Gamma_l * (v_r_1*x2v/rad + v_phi_1*x1v/r_cil)/alpha;
+              wvz = Gamma_l * (v_r_1*x3v/rad)/alpha;
             }
+
+            // We need to extract Gamma_exp instead of setting Gamma_l, because the
+            // metric is not Minkwoskian.
             Real v[3] = {wvx, wvy, wvz};
             Real v2 = Primitive::SquareVector(v, g3d);
             Real w = sqrt(1.0 + v2); 
@@ -442,11 +506,11 @@ namespace {
             Real u0_mom3 = u0(m,IM3,k,j,i);
             Real u0_tau = u0(m,IEN,k,j,i);
 
-            u0(m,IDN,k,j,i) += -alpha*vol*beta_dt*(u0_den - vol*den*w)/tau;
-            u0(m,IM1,k,j,i) += -alpha*vol*beta_dt*(u0_mom1 - vol*den*h*w*wv_x)/tau;
-            u0(m,IM2,k,j,i) += -alpha*vol*beta_dt*(u0_mom2 - vol*den*h*w*wv_y)/tau;
-            u0(m,IM3,k,j,i) += -alpha*vol*beta_dt*(u0_mom3 - vol*den*h*w*wv_z)/tau;
-            u0(m,IEN,k,j,i) += -alpha*vol*beta_dt*(u0_tau - vol*(den*h*w*w - pres - den*w))/tau;
+            u0(m,IDN,k,j,i) += -alpha*vol*beta_dt*(u0_den - vol*den*w)/tau * epsilon_frac;
+            u0(m,IM1,k,j,i) += -alpha*vol*beta_dt*(u0_mom1 - vol*den*h*w*wv_x)/tau * epsilon_frac;
+            u0(m,IM2,k,j,i) += -alpha*vol*beta_dt*(u0_mom2 - vol*den*h*w*wv_y)/tau * epsilon_frac;
+            u0(m,IM3,k,j,i) += -alpha*vol*beta_dt*(u0_mom3 - vol*den*h*w*wv_z)/tau * epsilon_frac;
+            u0(m,IEN,k,j,i) += -alpha*vol*beta_dt*(u0_tau - vol*(den*h*w*w - pres - den*w))/tau * epsilon_frac;
           }
         }
       });
