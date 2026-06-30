@@ -85,6 +85,10 @@ namespace {
   Real r0;
   Real theta_j;
   Real Lj;
+  Real sigma_r;
+  Real sigma_phi;
+  Real ratio;
+  Real t_delay;
   void SetADMVariablesToFLRW(MeshBlockPack *pmbp);
   void SetCentralEngine(Mesh* pm, const Real bdt);
 }
@@ -113,14 +117,17 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   // Central Engine Radius:
-
   r0        = pin->GetReal("problem", "r0");
   theta_j   = pin->GetReal("problem", "theta_j");
   Lj        = pin->GetReal("problem", "Lj");
   v_r       = pin->GetReal("problem", "v_r");
   v_phi     = pin->GetReal("problem", "v_phi");
   Gamma_inf = pin->GetReal("problem", "Gamma_inf");
+  sigma_r   = pin->GetReal("problem", "sigma_r");
+  sigma_phi = pin->GetReal("problem", "sigma_phi");
+  ratio     = pin->GetReal("problem", "ratio");
   t_eng     = pin->GetReal("problem", "t_eng");
+  t_delay   = pin->GetReal("problem", "t_delay");
 
   user_srcs_func = &SetCentralEngine;
 
@@ -128,12 +135,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Ejecta parameters:
 
-  Real r_ejecta   = pin->GetOrAddReal("problem", "r_ejecta", 1.0);
-  Real v_ejecta   = pin->GetOrAddReal("problem", "v_ejecta", 1.0);
-  Real d_ejecta   = pin->GetOrAddReal("problem", "d_ejecta", 1.0);
-  Real d_ism      = pin->GetOrAddReal("problem", "d_ism", 1.0);
-  Real m_ejecta   = pin->GetOrAddReal("problem", "m_ejecta", 1.0);
-  Real temp      = pin->GetOrAddReal("problem", "temp", 1.0);
+  Real r_ejecta = pin->GetOrAddReal("problem", "r_ejecta", 1.0);
+  Real v_ejecta = pin->GetOrAddReal("problem", "v_ejecta", 1.0);
+  Real d_ejecta = pin->GetOrAddReal("problem", "d_ejecta", 1.0);
+  Real d_ism    = pin->GetOrAddReal("problem", "d_ism", 1.0);
+  Real m_ejecta = pin->GetOrAddReal("problem", "m_ejecta", 1.0);
+  Real temp     = pin->GetOrAddReal("problem", "temp", 1.0);
  
   // whether to use a power-law, exponential-law or constant density tail
   std::string ism_dep = pin->GetOrAddString("problem", "ism_dep", "constant");
@@ -144,7 +151,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     std::cout << "Defaulting to constant" << std::endl;
     constant = true;
   }
-
   Real n_ism;
   Real tau_ism;
   // Select the tail parameters based on the choice of tail type
@@ -183,19 +189,27 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real &x1min = size.d_view(m).x1min;
       Real &x1max = size.d_view(m).x1max;
       int nx1 = indcs.nx1;
+      Real x1l = LeftEdgeX(i-is, nx1, x1min, x1max);
       Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+      Real x1r = LeftEdgeX(i-is+1, nx1, x1min, x1max);
 
       Real &x2min = size.d_view(m).x2min;
       Real &x2max = size.d_view(m).x2max;
       int nx2 = indcs.nx2;
+      Real x2l = LeftEdgeX(j-js, nx2, x2min, x2max);
       Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+      Real x2r = LeftEdgeX(j-js+1, nx2, x2min, x2max);
 
       Real &x3min = size.d_view(m).x3min;
       Real &x3max = size.d_view(m).x3max;
       int nx3 = indcs.nx3;
+      Real x3l = LeftEdgeX(k-ks, nx3, x3min, x3max);
       Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+      Real x3r = LeftEdgeX(k-ks+1, nx3, x3min, x3max);
 
+      Real rad_l = sqrt(SQR(x1l) + SQR(x2l) + SQR(x3l));
       Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+      Real rad_r = sqrt(SQR(x1r) + SQR(x2r) + SQR(x3r));
 
       Real vel_x;
       Real vel_y;
@@ -220,9 +234,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real rho_0 = m_ejecta_1/(4*M_PI*r0_1*r0_1);
       rho_0 *= 1.0/(r_ejecta_1*(1.0 - r0_1/r_ejecta_1)); 
       
-      if (rad < r0_1) {
+      if (rad <= r0_1) {
         den = rho_0;
-      } else if (rad >= r0_1 && rad < r_ejecta_1) {
+      } else if (rad > r0_1 && rad < r_ejecta_1) {
         den = rho_0 * SQR(r0_1/rad);
       } else {
         if (power_law) {
@@ -236,6 +250,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
           den = d_ism;
         }
       }
+
+      // Reuse the Immerse BC fractional volume to define a more accurate boundary values.
+      // if (rad_l < r0_1 && rad_r>r0_1) {
+      //   Real epsilon_frac = CalcVolFraction(x1l, x1r, x2l, x2r, x3l, x3r, r0_1);
+      //   den = rho_0 * epsilon_frac + rho_0 * SQR(r0_1/rad_r) * (1.0 - epsilon_frac);
+      // } else if (rad_l < r_ejecta_1 && rad_r>r_ejecta_1) {
+      //   Real epsilon_frac = CalcVolFraction(x1l, x1r, x2l, x2r, x3l, x3r, r_ejecta_1);
+      //   den = rho_0 * SQR(r0_1/rad) * epsilon_frac + d_ism * (1.0 - epsilon_frac);
+      // }
 
       Real pres = temp*den; 
 
@@ -397,9 +420,9 @@ namespace {
     // This is where we would set the source terms for the central engine, if we wanted to.
     MeshBlockPack *pmbp = pm->pmb_pack;
     const Real t = pmbp->pmesh->time;
+    
+    if (t > t_eng || t < t_delay) return;
     Real tau = pmbp->pmesh->dt;
-
-    if (t > t_eng) return;
     
     auto &indcs = pmbp->pmesh->mb_indcs;
     int is = indcs.is;
@@ -424,94 +447,171 @@ namespace {
       const Real Gamma_inf_1 = Gamma_inf;
       const Real r0_1 = r0;
       const Real theta_j_1 = theta_j;
+      const Real sigma_r_1 = sigma_r;
+      const Real sigma_phi_1 = sigma_phi;
+      const Real ratio_1 = ratio;
     
       par_for("central_engine", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
         
         Real &x1min = size.d_view(m).x1min;
         Real &x1max = size.d_view(m).x1max;
+        Real x1_l = LeftEdgeX(i-is, indcs.nx1, x1min, x1max);
         Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+        Real x1_r = LeftEdgeX(i-is+1, indcs.nx1, x1min, x1max);
 
         Real &x2min = size.d_view(m).x2min;
         Real &x2max = size.d_view(m).x2max;
+        Real x2_l = LeftEdgeX(j-js, indcs.nx2, x2min, x2max);
         Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+        Real x2_r = LeftEdgeX(j-js+1, indcs.nx2, x2min, x2max);
 
         Real &x3min = size.d_view(m).x3min;
         Real &x3max = size.d_view(m).x3max;
+        Real x3_l = LeftEdgeX(k-ks, indcs.nx3, x3min, x3max);
         Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+        Real x3_r = LeftEdgeX(k-ks+1, indcs.nx3, x3min, x3max);
 
-        Real rad_l = sqrt(SQR(x1min) + SQR(x2min) + SQR(x3min));
-        Real rad_r = sqrt(SQR(x1max) + SQR(x2max) + SQR(x3max));
-
+        Real rad_l = sqrt(SQR(x1_l) + SQR(x2_l) + SQR(x3_l));
+        Real rad_r = sqrt(SQR(x1_r) + SQR(x2_r) + SQR(x3_r));
         Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
         Real r_cil = sqrt(SQR(x1v) + SQR(x2v));
 
-        Real g3d[NSPMETRIC] = {adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
-                              adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
-                              adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i)};
-
         const Real& alpha = adm.alpha(m, k, j, i);
 
-        Real detg = adm::SpatialDet(g3d[S11], g3d[S12], g3d[S13],
-                                    g3d[S22], g3d[S23], g3d[S33]);
-        Real vol = sqrt(detg);
+        Real theta = acos(x3v/rad);
+        Real theta_min = M_PI - theta_j_1;
+        if ((rad>0 && rad <= r0_1/alpha) && ((theta < theta_j_1) || (theta > theta_min))) {
 
-        Real den;
-        Real wvx;
-        Real wvy;
-        Real wvz;
-        Real wv_x;
-        Real wv_y;
-        Real wv_z;
-        Real pres;
+          Real g3d[NSPMETRIC] = {adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
+                                 adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
+                                 adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i)};
 
-        Real Gamma_l = 1.0 / sqrt(1.0 - (SQR(v_r_1) + SQR(v_phi_1)));
-        Real h = Gamma_inf_1/Gamma_l;
-        
-        if (rad > 0 && rad <= r0_1/alpha) {
+          Real detg = adm::SpatialDet(g3d[S11], g3d[S12], g3d[S13],
+                                      g3d[S22], g3d[S23], g3d[S33]);
+          Real vol = sqrt(detg);
+
+          Real den;
+          Real wvx;
+          Real wvy;
+          Real wvz;
+          Real wv_x;
+          Real wv_y;
+          Real wv_z;
+          Real pres;
+
+          Real Gamma = 1.0 / sqrt(1.0 - (SQR(v_r_1) + SQR(v_phi_1)));
+          Real Gamma_r = 1.0 / sqrt(1.0 - SQR(v_r_1));
+          Real h = Gamma_inf_1/Gamma_r; 
           Real epsilon_frac = 1.0;
+
           if (rad_l < r0_1/alpha && rad_r > r0_1/alpha) {
-            epsilon_frac = CalcVolFraction(x1min, x1max, x2min, x2max, x3min, x3max, r0_1);
+            epsilon_frac = CalcVolFraction(x1_l, x1_r, x2_l, x2_r, x3_l, x3_r, r0_1/alpha);
           }
 
-          Real theta = acos(x3v/rad);
-          Real theta_min = M_PI - theta_j_1;
-          if ((theta < theta_j_1) || (theta > theta_min)) {
-            den = Lj_1/(4*M_PI*SQR(r0_1)*v_r_1*SQR(Gamma_l)*h);
-            if (r_cil == 0) {
-              wvx = 0.0;
-              wvy = 0.0;
-              wvz = Gamma_l * (v_r_1*x3v/rad)/alpha;
+          den = Lj_1/(4*M_PI*SQR(r0_1)*v_r_1*SQR(Gamma_r)*h);
+
+          if (r_cil == 0) {
+            wvx = 0.0;
+            wvy = 0.0;
+            wvz = Gamma * (v_r_1*x3v/rad)/alpha;
+          } else {
+            Real x;
+            if (theta > theta_min){
+              x = M_PI - theta;
             } else {
-              wvx = Gamma_l * (v_r_1*x1v/rad - v_phi_1*x2v/r_cil)/alpha;
-              wvy = Gamma_l * (v_r_1*x2v/rad + v_phi_1*x1v/r_cil)/alpha;
-              wvz = Gamma_l * (v_r_1*x3v/rad)/alpha;
+              x = theta;
             }
-
-            // We need to extract Gamma_exp instead of setting Gamma_l, because the
-            // metric is not Minkwoskian.
-            Real v[3] = {wvx, wvy, wvz};
-            Real v2 = Primitive::SquareVector(v, g3d);
-            Real w = sqrt(1.0 + v2); 
-
-            wv_x = g3d[S11]*wvx + g3d[S12]*wvy + g3d[S13]*wvz;
-            wv_y = g3d[S12]*wvx + g3d[S22]*wvy + g3d[S23]*wvz;
-            wv_z = g3d[S13]*wvx + g3d[S23]*wvy + g3d[S33]*wvz;
-          
-            pres = (gamma - 1.0)/gamma * (h - 1.0) * den;
-
-            Real u0_den = u0(m,IDN,k,j,i);
-            Real u0_mom1 = u0(m,IM1,k,j,i);
-            Real u0_mom2 = u0(m,IM2,k,j,i);
-            Real u0_mom3 = u0(m,IM3,k,j,i);
-            Real u0_tau = u0(m,IEN,k,j,i);
-
-            u0(m,IDN,k,j,i) += -alpha*vol*beta_dt*(u0_den - vol*den*w)/tau * epsilon_frac;
-            u0(m,IM1,k,j,i) += -alpha*vol*beta_dt*(u0_mom1 - vol*den*h*w*wv_x)/tau * epsilon_frac;
-            u0(m,IM2,k,j,i) += -alpha*vol*beta_dt*(u0_mom2 - vol*den*h*w*wv_y)/tau * epsilon_frac;
-            u0(m,IM3,k,j,i) += -alpha*vol*beta_dt*(u0_mom3 - vol*den*h*w*wv_z)/tau * epsilon_frac;
-            u0(m,IEN,k,j,i) += -alpha*vol*beta_dt*(u0_tau - vol*(den*h*w*w - pres - den*w))/tau * epsilon_frac;
+            wvx = Gamma * (v_r_1*x1v/rad - v_phi_1*(x/theta_j_1)*x2v/r_cil)/alpha;
+            wvy = Gamma * (v_r_1*x2v/rad + v_phi_1*(x/theta_j_1)*x1v/r_cil)/alpha;
+            wvz = Gamma * (v_r_1*x3v/rad)/alpha;
           }
+
+          // We need to extract w in the expanding cordinates instead of using Gamma_l, because we
+          // converted wv from Lorentz to the expanding coordinates, but not w alone.
+          Real v[3] = {wvx, wvy, wvz};
+          Real v2 = Primitive::SquareVector(v, g3d);
+          Real w = sqrt(1.0 + v2); 
+
+          wv_x = g3d[S11]*wvx + g3d[S12]*wvy + g3d[S13]*wvz;
+          wv_y = g3d[S12]*wvx + g3d[S22]*wvy + g3d[S23]*wvz;
+          wv_z = g3d[S13]*wvx + g3d[S23]*wvy + g3d[S33]*wvz;
+
+          // Magnetic Field Prescription
+          Real eta = 1/(1+0.5*(sigma_r_1+sigma_phi_1))*(h+0.5*(sigma_r_1 + sigma_phi_1)); //express h in terms of h*
+          Real pres_avg = (gamma - 1.0)/gamma * (eta - 1.0) * den;
+          Real br = sqrt(2.0*sigma_r_1*pres_avg);
+          Real factor = -SQR(ratio_1)/(1 + SQR(ratio_1)) + ratio_1*atan(1/ratio_1);
+          Real factor_inv = 1.0/factor;
+          Real bphi = Gamma_r * sqrt(pres_avg*sigma_phi_1*factor_inv);  //Check that pavg is correct, note that h-> thermal, not hstar
+          
+          // Adding the magnetic field. This will be used to compute the conserved 
+          // variables contributions of the prescribed magnetic fields.
+          Real bx;
+          Real by;
+          Real bz;
+          if (r_cil == 0) {
+            bx = 0.0;
+            by = 0.0;
+            bz = (br*x3v/rad)/SQR(alpha);
+          } else {
+            Real theta_m = ratio_1 * theta_j_1;
+            Real x;
+            if (theta > theta_min){
+              x = M_PI - theta;
+            } else {
+              x = theta;
+            }
+            bx = (br*x1v/rad - bphi*(x/theta_m)*x2v/r_cil)/SQR(alpha);
+            by = (br*x2v/rad + bphi*(x/theta_m)*x1v/r_cil)/SQR(alpha);
+            bz = (br*x3v/rad)/SQR(alpha);
+          }
+
+          //Lowering the magnetic field:
+          Real b_x = g3d[S11]*bx + g3d[S12]*by + g3d[S13]*bz;
+          Real b_y = g3d[S12]*bx + g3d[S22]*by + g3d[S23]*bz;
+          Real b_z = g3d[S13]*bx + g3d[S23]*by + g3d[S33]*bz;
+
+          // We will use the Lorentz values of br and bphi to compute the pressure.
+          // Since the pressure is an scalar, and no further corrections are needed.
+          Real x;
+          if (theta > theta_min){
+            x = M_PI - theta;
+          } else {
+            x = theta;
+          }
+          Real xm = ratio_1 * theta_j_1;
+          Real p[8];
+          p[0] = (-2.0*SQR(bphi)*SQR(x))/(SQR(Gamma_r)*(SQR(xm) + SQR(x)));
+          p[1] = (-2.0*SQR(bphi)*SQR(xm)*SQR(x))/(SQR(Gamma_r)*SQR(SQR(xm) + SQR(x)));
+          p[2] = (bphi*br*v_phi_1*v_r_1*xm*(-2.0*SQR(x) - (SQR(xm) + SQR(x))*log(SQR(xm)
+                /(SQR(xm) + SQR(x)))))/(theta_j_1*(SQR(xm) + SQR(x)));
+          p[3] = (SQR(br)*SQR(v_phi_1)*SQR(x))/(2.0*SQR(theta_j_1));
+          p[4] = -((bphi*br*v_phi_1*v_r_1*xm*log(1 + SQR(x)/SQR(xm)))/theta_j_1);
+          p[5] = (den*SQR(Gamma)*h*SQR(v_phi_1)*SQR(x))/(2.0*SQR(theta_j_1));
+          p[6] = (SQR(br)*SQR(v_phi_1)*SQR(x))/(2.0*SQR(theta_j_1));
+          p[7] = (-2.0*bphi*br*v_phi_1*v_r_1*xm*log(1.0 + SQR(x)/SQR(xm)))/theta_j_1;
+
+          pres = std::accumulate(std::begin(p), std::end(p), pres_avg);
+    
+          Real u0_den = u0(m,IDN,k,j,i);
+          Real u0_mom1 = u0(m,IM1,k,j,i);
+          Real u0_mom2 = u0(m,IM2,k,j,i);
+          Real u0_mom3 = u0(m,IM3,k,j,i);
+          Real u0_tau = u0(m,IEN,k,j,i);
+
+          Real u0_den_eq = vol*den*w;
+          Real b2 = b_x * bx + b_y * by + b_z * bz;
+          Real u0_mom1_eq = vol*(den*h*w*wv_x + b2*wv_x/w  - (bx*wv_x/w + by*wv_y/w + bz*wv_z/w)*b_x);
+          Real u0_mom2_eq = vol*(den*h*w*wv_y + b2*wv_y/w  - (bx*wv_x/w + by*wv_y/w + bz*wv_z/w)*b_y);
+          Real u0_mom3_eq = vol*(den*h*w*wv_z + b2*wv_z/w  - (bx*wv_x/w + by*wv_y/w + bz*wv_z/w)*b_z);
+          Real u0_tau_eq = vol*(den*h*w*w + b2 - pres - 0.5*(SQR(bx*wv_x/w + by*wv_y/w + bz*wv_z/w) + b2/(w*w)) - den*w);
+
+          u0(m,IDN,k,j,i) += -alpha*vol*beta_dt*(u0_den - u0_den_eq)/tau * epsilon_frac;
+          u0(m,IM1,k,j,i) += -alpha*vol*beta_dt*(u0_mom1 - u0_mom1_eq)/tau * epsilon_frac;
+          u0(m,IM2,k,j,i) += -alpha*vol*beta_dt*(u0_mom2 - u0_mom2_eq)/tau * epsilon_frac;
+          u0(m,IM3,k,j,i) += -alpha*vol*beta_dt*(u0_mom3 - u0_mom3_eq)/tau * epsilon_frac;
+          u0(m,IEN,k,j,i) += -alpha*vol*beta_dt*(u0_tau - u0_tau_eq)/tau * epsilon_frac;
         }
       });
     }

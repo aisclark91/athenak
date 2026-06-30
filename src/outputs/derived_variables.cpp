@@ -26,6 +26,7 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
 #include "radiation/radiation_tetrad.hpp"
 #include "particles/particles.hpp"
 #include "outputs.hpp"
@@ -52,6 +53,28 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
   // derived variable index
   int &i_dv = out_params.i_derived;
   int &n_dv = out_params.n_derived;
+
+  // lorentz factor = sqrt(1+wv^2)
+  if (name.compare("lorentz_factor") == 0) {
+    if (derived_var.extent(4) <= 1)
+      Kokkos::realloc(derived_var, nmb, n_dv, n3, n2, n1);
+    auto dv = derived_var;
+    auto &w0_ = pm->pmb_pack->pmhd->w0;
+    auto &adm = pm->pmb_pack->padm->adm;
+
+    par_for("lorentz_factor", DevExeSpace(), 0, (nmb-1), ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+
+      Real g3d[NSPMETRIC] = {adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
+                    adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
+                    adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i)};
+
+      Real v[3] = {w0_(m, IVX,k,j,i), w0_(m, IVY,k,j,i), w0_(m, IVZ,k,j,i)};
+      Real v2 = Primitive::SquareVector(v, g3d);
+      Real w = sqrt(1.0 + v2); 
+    });
+    i_dv += 1; // increment derived variable index
+  }
 
   // temperature = pressure / density
   if (name.compare("temperature") == 0) {
