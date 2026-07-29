@@ -38,6 +38,7 @@ namespace {
   Real t_eng;
   Real v_r;
   Real v_phi;
+  Real epsilon_h0;
   Real Gamma_inf;
   Real r0_ejecta;
   Real theta_j;
@@ -49,12 +50,25 @@ namespace {
 
   //Numerical Ejecta:
   Real t_num;
+  constexpr int kNTheta = 51;
+  constexpr int kNTime  = 4994;
   std::vector<Block> numerical_data;
 
+  // Device-resident copies of the ejecta table. Built once (in UserProblem, on both
+  // a fresh start and a restart) and reused by the initial conditions kernel and by
+  // SetNumericalEjecta on every call, instead of re-uploading from numerical_data
+  // on every substep.
+  DualArray1D<Real> theta_ej;
+  DualArray2D<Real> density_ej;
+  DualArray2D<Real> velocity_ej;
+  DualArray2D<Real> temperature_ej;
+  DualArray2D<Real> time_ej;
+
   //Functors:
+  void BuildNumericalEjectaDeviceArrays();
   void SetADMVariablesToFLRW(MeshBlockPack *pmbp);
-  // void SetCentralEngine(Mesh* pm, const Real bdt);
   void SetNumericalEjecta(Mesh* pm, const Real bdt);
+   // void SetCentralEngine(Mesh* pm, const Real bdt);
 }
 
 
@@ -214,6 +228,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Maximum radius of the expansion
   Real rmax = pin->GetReal("problem", "rmax");
+  epsilon_h0 = pin->GetReal("problem", "epsilon_h0");
 
   if (is_expanding) {  
     h0 = vmax/rmax;
@@ -238,11 +253,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // t_delay   = pin->GetReal("problem", "t_delay");
 
   {
-    // Reading: Ejecta file
-    Real t_num = pin->GetReal("problem", "t_num") ;
-    std::string filename = pin->GetString("problem", "file_path");;
-    NumericalEjectaData model(filename, 51, 4994);
+    // Reading: Ejecta file (done once; cached in numerical_data and uploaded to the
+    // device-resident arrays below, both of which persist across restarts).
+    t_num = pin->GetReal("problem", "t_num");
+    std::string filename = pin->GetString("problem", "file_path");
+    NumericalEjectaData model(filename, kNTheta, kNTime);
     numerical_data = model.ComputeBlocks();
+    BuildNumericalEjectaDeviceArrays();
   }
  
   // Set an immerse bc that recreate the ejecta.
@@ -292,49 +309,17 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       gm1 = 1.0; // DynGRMHD uses pressure, not energy.
     }
     // We will consider: c=1, [M] = g, [L]=km.
-    const Real r0 = r0_ejecta; 
-    const std::vector<Block> h_ejecta = numerical_data;
+    const Real r0 = r0_ejecta;
 
     // We define the primitive variables:
     auto& w0_ = pmbp->pmhd->w0;
-    
-    // We define a dual Kokkos view to pass the density, velocity and
-    // temperature at all times, in order extrapolate it to t=0.
-    DualArray1D<Real> theta("theta_arr", 51);
-    DualArray2D<Real> density("density_arr", 51, 4994);
-    DualArray2D<Real> velocity("velocity_arr", 51, 4994);
-    DualArray2D<Real> temperature("temperature_arr", 51, 4994);
-    DualArray2D<Real> time("time", 51, 4994);
 
-    for(int i=0; i<h_ejecta.size();i++) {
-      theta.h_view(i) = h_ejecta[i].th;
-    }
-
-    for(int i=0; i<h_ejecta.size(); i++) {
-      for(int j=0; j<4994; j++) {
-        density.h_view(i,j) = h_ejecta[i].rho[j];
-        velocity.h_view(i,j) = h_ejecta[i].vel[j];
-        temperature.h_view(i,j) = h_ejecta[i].temperature[j];
-        time.h_view(i,j) = h_ejecta[i].time[j];
-      }
-    }
-
-    // We push the defined dual views to the host and device execution spaces respectively.
-    // Finally, we free the std::vector<Block> h_ejecta memory.
-    theta.template modify<HostMemSpace>();   
-    theta.template sync<DevExeSpace>();  
-
-    density.template modify<HostMemSpace>();   
-    density.template sync<DevExeSpace>();  
-
-    velocity.template modify<HostMemSpace>();   
-    velocity.template sync<DevExeSpace>();  
-
-    temperature.template modify<HostMemSpace>();   
-    temperature.template sync<DevExeSpace>();  
-
-    time.template modify<HostMemSpace>();   
-    time.template sync<DevExeSpace>();  
+    // Reuse the device-resident ejecta table built once in BuildNumericalEjectaDeviceArrays().
+    DualArray1D<Real> theta = theta_ej;
+    DualArray2D<Real> density = density_ej;
+    DualArray2D<Real> velocity = velocity_ej;
+    DualArray2D<Real> temperature = temperature_ej;
+    DualArray2D<Real> time = time_ej;
 
     par_for("pgen_blast1",DevExeSpace(),0,(pmbp->nmb_thispack-1),ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m,int k,int j,int i) {
@@ -380,7 +365,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
       const Real g_cm3_to_g_km3 = 1.0e15;
       const Real cm_s_1 = 3.335641e-11;
-      const Real K_to_1 = 9.2510824e-22/mu;
+      const Real K_to_1 = 9.251087e-14/mu;
 
       den *= g_cm3_to_g_km3;
       vel *= cm_s_1;
@@ -527,6 +512,47 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
 namespace {
 //----------------------------------------------------------------------------------------
+//! \fn BuildNumericalEjectaDeviceArrays()
+//! \brief Uploads numerical_data (read once from file) into the file-scope DualArrays,
+//! so SetNumericalEjecta can reuse them on every call instead of re-uploading each time.
+  void BuildNumericalEjectaDeviceArrays() {
+    const std::vector<Block>& h_ejecta = numerical_data;
+
+    theta_ej       = DualArray1D<Real>("theta_arr", kNTheta);
+    density_ej     = DualArray2D<Real>("density_arr", kNTheta, kNTime);
+    velocity_ej    = DualArray2D<Real>("velocity_arr", kNTheta, kNTime);
+    temperature_ej = DualArray2D<Real>("temperature_arr", kNTheta, kNTime);
+    time_ej        = DualArray2D<Real>("time_arr", kNTheta, kNTime);
+
+    for (int i = 0; i < static_cast<int>(h_ejecta.size()); i++) {
+      theta_ej.h_view(i) = h_ejecta[i].th;
+    }
+
+    for (int i = 0; i < static_cast<int>(h_ejecta.size()); i++) {
+      for (int j = 0; j < kNTime; j++) {
+        density_ej.h_view(i,j)     = h_ejecta[i].rho[j];
+        velocity_ej.h_view(i,j)    = h_ejecta[i].vel[j];
+        temperature_ej.h_view(i,j) = h_ejecta[i].temperature[j];
+        time_ej.h_view(i,j)        = h_ejecta[i].time[j];
+      }
+    }
+
+    theta_ej.template modify<HostMemSpace>();
+    theta_ej.template sync<DevExeSpace>();
+
+    density_ej.template modify<HostMemSpace>();
+    density_ej.template sync<DevExeSpace>();
+
+    velocity_ej.template modify<HostMemSpace>();
+    velocity_ej.template sync<DevExeSpace>();
+
+    temperature_ej.template modify<HostMemSpace>();
+    temperature_ej.template sync<DevExeSpace>();
+
+    time_ej.template modify<HostMemSpace>();
+    time_ej.template sync<DevExeSpace>();
+  }
+
   void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
     const Real t = pmbp->pmesh->time;
     auto &adm = pmbp->padm->adm;
@@ -539,12 +565,14 @@ namespace {
     int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
     int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
 
-    // Set FLRW metric variables for the current mesh time.
-    Real a;
-    Real b;
+    // Set expanding metric variables for the current mesh time
+    const Real t0 = t_num;
+    const Real epsilon = epsilon_h0;
 
-    a = exp(h0*t); 
-    b = h0;
+    // We will construct a switch to let the ejecta expand from the immmerse b.c
+    // turning off the expansion before t_num.
+    const Real b = h0/2.0*(1+tanh(t-t0)/(2.0*epsilon));
+    const Real a = exp(b*t);
 
     par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -604,44 +632,17 @@ namespace {
       EOS_Data &eos = pmbp->pmhd->peos->eos_data;
       Real gamma = eos.gamma;
       DvceArray5D<Real> &u0 = pmbp->pmhd->u0;
-       
-      const std::vector<Block>& h_ejecta = numerical_data;
+
       const Real r0 = r0_ejecta;
 
-      DualArray1D<Real> theta_tm("theta_arr_tm", 51);
-      DualArray2D<Real> density_tm("density_arr_tm", 51, 4994);
-      DualArray2D<Real> velocity_tm("velocity_arr_tm", 51, 4994);
-      DualArray2D<Real> temperature_tm("temperature_arr_tm", 51, 4994);
-      DualArray2D<Real> time_tm("time_tm", 51, 4994);
+      // Reuse the device-resident ejecta table built once in
+      // BuildNumericalEjectaDeviceArrays(), instead of rebuilding it every call.
+      DualArray1D<Real> theta_tm = theta_ej;
+      DualArray2D<Real> density_tm = density_ej;
+      DualArray2D<Real> velocity_tm = velocity_ej;
+      DualArray2D<Real> temperature_tm = temperature_ej;
+      DualArray2D<Real> time_tm = time_ej;
 
-      for(int i=0; i<h_ejecta.size();i++) {
-        theta_tm.h_view(i) = h_ejecta[i].th;
-      }
-
-      for(int i=0; i<h_ejecta.size(); i++) {
-        for(int j=0; j<4994; j++) {
-          density_tm.h_view(i,j) = h_ejecta[i].rho[j];
-          velocity_tm.h_view(i,j) = h_ejecta[i].vel[j];
-          temperature_tm.h_view(i,j) = h_ejecta[i].temperature[j];
-          time_tm.h_view(i,j) = h_ejecta[i].time[j];
-        }
-      }
-
-      theta_tm.template modify<HostMemSpace>();   
-      theta_tm.template sync<DevExeSpace>();  
-
-      density_tm.template modify<HostMemSpace>();   
-      density_tm.template sync<DevExeSpace>();  
-
-      velocity_tm.template modify<HostMemSpace>();   
-      velocity_tm.template sync<DevExeSpace>();  
-
-      temperature_tm.template modify<HostMemSpace>();   
-      temperature_tm.template sync<DevExeSpace>();  
-
-      time_tm.template modify<HostMemSpace>();   
-      time_tm.template sync<DevExeSpace>();
-      
       par_for("numerical_ejecta", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
         
@@ -686,7 +687,7 @@ namespace {
           const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
           const Real g_cm3_to_g_km3 = 1.0e15;
           const Real cm_s_1 = 3.335641e-11;
-          const Real K_to_1 = 9.2510824e-22/mu;
+          const Real K_to_1 = 9.251087e-14/mu;
 
           den *= g_cm3_to_g_km3;
           vel *= cm_s_1;
