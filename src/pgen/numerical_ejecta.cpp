@@ -16,6 +16,7 @@
 #include <string>
 #include <iostream>
 #include <vector>
+#include <cstdlib>
 
 #include "parameter_input.hpp"
 #include "athena.hpp"
@@ -47,6 +48,7 @@ namespace {
   Real t_delay; 
 
   //Numerical Ejecta:
+  Real t_num;
   std::vector<Block> numerical_data;
 
   //Functors:
@@ -65,8 +67,8 @@ Real Interpolate1D(Real &var_i, Real &var_i1, Real &x_i, Real &x_i1, Real &x) {
 
 
 KOKKOS_INLINE_FUNCTION
-Real Interpolate2D(int ith, int jt, int kt, DualArray1D<Real> &theta, DualArray2D<Real> &time, 
-  DualArray2D<Real>& var_ej, Real th, Real t) {
+Real Interpolate2D(int ith, int jt, int kt, const DualArray1D<Real> &theta, const DualArray2D<Real> &time, 
+  const DualArray2D<Real>& var_ej, Real th, Real t) {
 
     Real th_i = theta.d_view(ith);
     Real th_i1 = theta.d_view(ith+1);
@@ -91,42 +93,44 @@ Real Interpolate2D(int ith, int jt, int kt, DualArray1D<Real> &theta, DualArray2
 
 
 KOKKOS_INLINE_FUNCTION
-int FindTimeIndex(int ith, DualArray2D<Real> &time, Real t) {
+int FindTimeIndex(int ith, const DualArray2D<Real> &time, Real t) {
 
+  int size = time.view_device().extent(1);
   int index;
-  int size = time.extent(1);
+  // int index = 0;
 
-  if(t < time.d_view(ith,0)) {
+  if(t <= time.d_view(ith,0)) {
     index = 0;
   }
 
   for(int j=1; j<size; j++) {
-    if(t>time.d_view(ith,j-1) && t<time.d_view(ith, j)) {
+    if(t>time.d_view(ith,j-1) && t<=time.d_view(ith, j)) {
       index = j-1;
       break;
     }
   }
 
-  if(t >= time.d_view(ith, size-1)){
+  if(t > time.d_view(ith, size-1)){
     index = size-2;
   }
-  
+
   return index;
 }
 
 
 KOKKOS_INLINE_FUNCTION
-int FindThetaIndex(DualArray1D<Real> &theta, const Real th) {
+int FindThetaIndex(const DualArray1D<Real> &theta, Real th) {
 
+  int size = theta.view_device().extent(0);
   int index;
-  int size = theta.extent(0);
+  // int index = 0;
 
-  if (th < 0.0 || th > M_PI) {
-    std::cout << "The value of theta cannot be outside the [0,Pi] range." << std::endl;
-    exit(EXIT_FAILURE);
-  }
+  // if (th < 0.0 || th > M_PI) {
+    // std::cout << "The value of theta cannot be outside the [0,Pi] range." << std::endl;
+  //   exit(EXIT_FAILURE);
+  // }
 
-  if (th > 0.0 && th <= theta.d_view(0)) {
+  if (th <= theta.d_view(0)) {
     index = 0;
   }
 
@@ -137,7 +141,7 @@ int FindThetaIndex(DualArray1D<Real> &theta, const Real th) {
     }
   }
 
-  if (th > theta.d_view(size-1) && th <= M_PI) {
+  if (th > theta.d_view(size-1)) {
     index = size-2;
   }
 
@@ -222,19 +226,20 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Central Engine Radius:
   r0_ejecta = pin->GetReal("problem", "r0");
-  theta_j   = pin->GetReal("problem", "theta_j");
-  Lj        = pin->GetReal("problem", "Lj");
-  v_r       = pin->GetReal("problem", "v_r");
-  v_phi     = pin->GetReal("problem", "v_phi");
-  Gamma_inf = pin->GetReal("problem", "Gamma_inf");
-  sigma_r   = pin->GetReal("problem", "sigma_r");
-  sigma_phi = pin->GetReal("problem", "sigma_phi");
-  ratio     = pin->GetReal("problem", "ratio");
-  t_eng     = pin->GetReal("problem", "t_eng");
-  t_delay   = pin->GetReal("problem", "t_delay");
+  // theta_j   = pin->GetReal("problem", "theta_j");
+  // Lj        = pin->GetReal("problem", "Lj");
+  // v_r       = pin->GetReal("problem", "v_r");
+  // v_phi     = pin->GetReal("problem", "v_phi");
+  // Gamma_inf = pin->GetReal("problem", "Gamma_inf");
+  // sigma_r   = pin->GetReal("problem", "sigma_r");
+  // sigma_phi = pin->GetReal("problem", "sigma_phi");
+  // ratio     = pin->GetReal("problem", "ratio");
+  // t_eng     = pin->GetReal("problem", "t_eng");
+  // t_delay   = pin->GetReal("problem", "t_delay");
 
   {
     // Reading: Ejecta file
+    Real t_num = pin->GetReal("problem", "t_num") ;
     std::string filename = pin->GetString("problem", "file_path");;
     NumericalEjectaData model(filename, 51, 4994);
     numerical_data = model.ComputeBlocks();
@@ -288,7 +293,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     }
     // We will consider: c=1, [M] = g, [L]=km.
     const Real r0 = r0_ejecta; 
-    const std::vector<Block>& h_ejecta = numerical_data;
+    const std::vector<Block> h_ejecta = numerical_data;
 
     // We define the primitive variables:
     auto& w0_ = pmbp->pmhd->w0;
@@ -580,6 +585,8 @@ namespace {
 
     MeshBlockPack *pmbp = pm->pmb_pack;
     const Real t = pmbp->pmesh->time;
+
+    if (t > t_num || t <= 0.0) return;
 
     auto &indcs = pmbp->pmesh->mb_indcs;
     int is = indcs.is;
