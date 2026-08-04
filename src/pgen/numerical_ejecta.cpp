@@ -29,43 +29,34 @@
 #include "units/units.hpp"
 #include "inputs/numerical_ejecta.hpp"
 
+constexpr int kNTheta = 51;
+constexpr int kNTime  = 4994;
+
 namespace {
   // Expansion:
   Real h0;
   bool is_expanding;
+  Real epsilon_h0;
 
   // Central Engine Variables:
-  Real t_eng;
-  Real v_r;
-  Real v_phi;
-  Real epsilon_h0;
-  Real Gamma_inf;
+  // Real t_eng;
+  // Real v_r;
+  // Real v_phi;
+  
+  // Real Gamma_inf;
   Real r0_ejecta;
-  Real theta_j;
-  Real Lj;
-  Real sigma_r;
-  Real sigma_phi;
-  Real ratio;
-  Real t_delay; 
+  // Real theta_j;
+  // Real Lj;
+  // Real sigma_r;
+  // Real sigma_phi;
+  // Real ratio;
+  // Real t_delay; 
 
   //Numerical Ejecta:
   Real t_num;
-  constexpr int kNTheta = 51;
-  constexpr int kNTime  = 4994;
   std::vector<Block> numerical_data;
 
-  // Device-resident copies of the ejecta table. Built once (in UserProblem, on both
-  // a fresh start and a restart) and reused by the initial conditions kernel and by
-  // SetNumericalEjecta on every call, instead of re-uploading from numerical_data
-  // on every substep.
-  DualArray1D<Real> theta_ej;
-  DualArray2D<Real> density_ej;
-  DualArray2D<Real> velocity_ej;
-  DualArray2D<Real> temperature_ej;
-  DualArray2D<Real> time_ej;
-
   //Functors:
-  void BuildNumericalEjectaDeviceArrays();
   void SetADMVariablesToFLRW(MeshBlockPack *pmbp);
   void SetNumericalEjecta(Mesh* pm, const Real bdt);
    // void SetCentralEngine(Mesh* pm, const Real bdt);
@@ -74,7 +65,6 @@ namespace {
 
 KOKKOS_INLINE_FUNCTION
 Real Interpolate1D(Real &var_i, Real &var_i1, Real &x_i, Real &x_i1, Real &x) {
-
   Real m = (var_i1 - var_i)/(x_i1 - x_i);
   return m*(x - x_i) + var_i;
 }
@@ -84,34 +74,46 @@ KOKKOS_INLINE_FUNCTION
 Real Interpolate2D(int ith, int jt, int kt, const DualArray1D<Real> &theta, const DualArray2D<Real> &time, 
   const DualArray2D<Real>& var_ej, Real th, Real t) {
 
-    Real th_i = theta.d_view(ith);
-    Real th_i1 = theta.d_view(ith+1);
+  Real th_i = theta.d_view(ith);
+  Real th_i1 = theta.d_view(ith+1);
+  
+  Real tm_j = time.d_view(ith, jt);
+  Real tm_j1 = time.d_view(ith, jt+1);
+  Real var_ij = var_ej.d_view(ith, jt);
+  Real var_ij1 = var_ej.d_view(ith,jt+1);
+  
+  Real var_i;
+  if (tm_j >= t && tm_j1 >= t) {
+    var_i = var_ij;        // t before first sample -> hold first value
+  } else if (tm_j < t && tm_j1 < t) {
+    var_i = var_ij1;        // t past last sample -> hold last value
+  } else {
+    var_i = Interpolate1D(var_ij, var_ij1, tm_j, tm_j1, t);
+  }
+    
+  Real tm_k = time.d_view(ith+1, kt);
+  Real tm_k1 = time.d_view(ith+1, kt+1);
+  Real var_ik = var_ej.d_view(ith+1, kt);
+  Real var_ik1 = var_ej.d_view(ith+1,kt+1);
 
-    Real tm_j = time.d_view(ith, jt);
-    Real tm_j1 = time.d_view(ith, jt+1);
-    Real var_ij = var_ej.d_view(ith, jt);
-    Real var_ij1 = var_ej.d_view(ith,jt+1); 
+  Real var_i1;
+  if (tm_k >= t && tm_k1 >= t) {
+    var_i1 = var_ik;        // t before first sample -> hold first value
+  } else if (tm_k < t && tm_k1 < t) {
+    var_i1 = var_ik1;        // t past last sample -> hold last value
+  } else {
+    var_i1 = Interpolate1D(var_ik, var_ik1, tm_k, tm_k1, t);
+  }
 
-    Real var_i = Interpolate1D(var_ij, var_ij1, tm_j, tm_j1, t);
-
-    Real tm_k = time.d_view(ith+1, kt);
-    Real tm_k1 = time.d_view(ith+1, kt+1);
-    Real var_ik = var_ej.d_view(ith+1, kt);
-    Real var_ik1 = var_ej.d_view(ith+1,kt+1);
-
-    Real var_i1 = Interpolate1D(var_ik, var_ik1, tm_k, tm_k1, t);
-
-    Real var = Interpolate1D(var_i, var_i1, th_i, th_i1, th);
-    return var;
+  Real var = Interpolate1D(var_i, var_i1, th_i, th_i1, th);
+  return var;
 }
 
 
 KOKKOS_INLINE_FUNCTION
 int FindTimeIndex(int ith, const DualArray2D<Real> &time, Real t) {
-
   int size = time.view_device().extent(1);
-  int index;
-  // int index = 0;
+  int index = 0;
 
   if(t <= time.d_view(ith,0)) {
     index = 0;
@@ -136,13 +138,7 @@ KOKKOS_INLINE_FUNCTION
 int FindThetaIndex(const DualArray1D<Real> &theta, Real th) {
 
   int size = theta.view_device().extent(0);
-  int index;
-  // int index = 0;
-
-  // if (th < 0.0 || th > M_PI) {
-    // std::cout << "The value of theta cannot be outside the [0,Pi] range." << std::endl;
-  //   exit(EXIT_FAILURE);
-  // }
+  int index = 0;
 
   if (th <= theta.d_view(0)) {
     index = 0;
@@ -228,6 +224,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Maximum radius of the expansion
   Real rmax = pin->GetReal("problem", "rmax");
+
   epsilon_h0 = pin->GetReal("problem", "epsilon_h0");
 
   if (is_expanding) {  
@@ -253,13 +250,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // t_delay   = pin->GetReal("problem", "t_delay");
 
   {
-    // Reading: Ejecta file (done once; cached in numerical_data and uploaded to the
-    // device-resident arrays below, both of which persist across restarts).
+    // Reading:
     t_num = pin->GetReal("problem", "t_num");
     std::string filename = pin->GetString("problem", "file_path");
     NumericalEjectaData model(filename, kNTheta, kNTime);
     numerical_data = model.ComputeBlocks();
-    BuildNumericalEjectaDeviceArrays();
   }
  
   // Set an immerse bc that recreate the ejecta.
@@ -281,6 +276,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     std::cout << "Defaulting to constant" << std::endl;
     constant = true;
   }
+
   Real n_ism;
   Real tau_ism;
   // Select the tail parameters based on the choice of tail type
@@ -289,9 +285,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   } else if (exponential) {
     tau_ism = pin->GetOrAddReal("problem", "tau_ism", 1.0);
   }
-
-  // magnetic field strenght
-  Real b_amb = pin->GetOrAddReal("problem", "b_amb", 0.1);
 
   // capture variables for the kernel
   auto &indcs = pmy_mesh_->mb_indcs;
@@ -310,16 +303,43 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     }
     // We will consider: c=1, [M] = g, [L]=km.
     const Real r0 = r0_ejecta;
-
+    const std::vector<Block> h_ejecta = numerical_data;
     // We define the primitive variables:
     auto& w0_ = pmbp->pmhd->w0;
 
-    // Reuse the device-resident ejecta table built once in BuildNumericalEjectaDeviceArrays().
-    DualArray1D<Real> theta = theta_ej;
-    DualArray2D<Real> density = density_ej;
-    DualArray2D<Real> velocity = velocity_ej;
-    DualArray2D<Real> temperature = temperature_ej;
-    DualArray2D<Real> time = time_ej;
+    DualArray1D<Real> theta_ej("theta_arr", kNTheta);
+    DualArray2D<Real> density_ej("density_arr", kNTheta, kNTime);
+    DualArray2D<Real> velocity_ej("velocity_arr", kNTheta, kNTime);
+    DualArray2D<Real> temperature_ej("temperature_arr", kNTheta, kNTime);
+    DualArray2D<Real> time_ej("time_arr", kNTheta, kNTime);
+
+    for (int i = 0; i < kNTheta; i++) {
+      theta_ej.h_view(i) = h_ejecta[i].th;
+    }
+
+    for (int i = 0; i < kNTheta; i++) {
+      for (int j = 0; j < kNTime; j++) {
+        density_ej.h_view(i,j)     = h_ejecta[i].rho[j];
+        velocity_ej.h_view(i,j)    = h_ejecta[i].v_infty[j];
+        temperature_ej.h_view(i,j) = h_ejecta[i].temperature[j];
+        time_ej.h_view(i,j)        = h_ejecta[i].time[j];
+      }
+    }
+
+    theta_ej.template modify<HostMemSpace>();
+    theta_ej.template sync<DevExeSpace>();
+
+    density_ej.template modify<HostMemSpace>();
+    density_ej.template sync<DevExeSpace>();
+
+    velocity_ej.template modify<HostMemSpace>();
+    velocity_ej.template sync<DevExeSpace>();
+
+    temperature_ej.template modify<HostMemSpace>();
+    temperature_ej.template sync<DevExeSpace>();
+
+    time_ej.template modify<HostMemSpace>();
+    time_ej.template sync<DevExeSpace>();
 
     par_for("pgen_blast1",DevExeSpace(),0,(pmbp->nmb_thispack-1),ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m,int k,int j,int i) {
@@ -344,52 +364,60 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
       Real x3r = LeftEdgeX(k-ks+1, nx3, x3min, x3max);
 
+      Real dx1 = size.d_view(m).dx1;
+      Real dx2 = size.d_view(m).dx2;
+      Real dx3 = size.d_view(m).dx3;
+      Real dr = sqrt(SQR(dx1)+SQR(dx2)+SQR(dx3));
+
       Real rad_l = sqrt(SQR(x1l) + SQR(x2l) + SQR(x3l));
       Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
       Real rad_r = sqrt(SQR(x1r) + SQR(x2r) + SQR(x3r));
+      Real r_cil = sqrt(SQR(x1v) + SQR(x2v));
 
-      Real th = acos(x3v/rad);
-      Real r_cil = sqrt(SQR(x1v) +SQR(x2v));
-
-      // Now we need to compute the index i, i+1, tied to th:
-
-      int ith = FindThetaIndex(theta, th);
-      int jt  = FindTimeIndex(ith, time, 0.0);
-      int kt  = FindTimeIndex(ith+1, time, 0.0);
-
-      Real den = Interpolate2D(ith, jt, kt, theta, time, density, th, 0.0);
-      Real vel = Interpolate2D(ith, jt, kt, theta, time, velocity, th, 0.0);
-      Real temp = Interpolate2D(ith, jt, kt, theta, time, temperature, th, 0.0);
-      
-      // Finally we convert to the right code units
-      const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
-      const Real g_cm3_to_g_km3 = 1.0e15;
-      const Real cm_s_1 = 3.335641e-11;
-      const Real K_to_1 = 9.251087e-14/mu;
-
-      den *= g_cm3_to_g_km3;
-      vel *= cm_s_1;
-      temp *= K_to_1;
-
-      // Now we assign this variables to r0
+      Real den;
+      Real veloc;
       Real wvx;
       Real wvy;
       Real wvz;
+      Real temp;
 
-      if (rad_l <= r0 && rad_r>= r0) {
+      //((rad_l - dr/2.0) <= r0 && (rad_r + dr/2.0)>= r0) 
+  
+      if(rad <= r0 && rad > 0.0) {
+
+        Real th = acos(Kokkos::fmin(1.0, Kokkos::fmax(-1.0, x3v/rad)));
+
+        int ith = FindThetaIndex(theta_ej, th);
+        int jt  = FindTimeIndex(ith, time_ej, 0.0);
+        int kt  = FindTimeIndex(ith+1, time_ej, 0.0);
+
+        den = Interpolate2D(ith, jt, kt, theta_ej, time_ej, density_ej, th, 0.0);
+        veloc = Interpolate2D(ith, jt, kt, theta_ej, time_ej, velocity_ej, th, 0.0);
+        temp = Interpolate2D(ith, jt, kt, theta_ej, time_ej, temperature_ej, th, 0.0);
+      
+        // Finally we convert to the right code units
+        const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
+        const Real g_cm3_to_g_km3 = 1.0e15;
+        const Real cm_s_1 = 3.335641e-11;
+        const Real K_to_1 = 9.251087e-14/mu;
+
+        den *= g_cm3_to_g_km3;
+        veloc *= cm_s_1;
+        temp *= K_to_1;
+
         if (r_cil == 0) {
           wvx = 0.0;
           wvy = 0.0;
-          wvz = vel * x3v / r0;
-          Real Gamma0 = 1.0/sqrt(1-SQR(wvx)-SQR(wvy)-SQR(wvz));
+          wvz = veloc * x3v / r0;
+          Real Gamma0 = 1.0/sqrt(1.0-SQR(wvx)-SQR(wvy)-SQR(wvz));
           wvx *= Gamma0;
           wvy *= Gamma0;
           wvz *= Gamma0;
         } else {
-          wvx = vel * x1v / r0;
-          wvy = vel * x2v / r0;
-          wvz = vel * x3v / r0;
-          Real Gamma0 = 1.0/sqrt(1-SQR(wvx)-SQR(wvy)-SQR(wvz));
+          wvx = veloc * x1v / r0;
+          wvy = veloc * x2v / r0;
+          wvz = veloc * x3v / r0;
+          Real Gamma0 = 1.0/sqrt(1.0-SQR(wvx)-SQR(wvy)-SQR(wvz));
           wvx *= Gamma0;
           wvy *= Gamma0;
           wvz *= Gamma0;
@@ -422,7 +450,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
     // initialize magnetic fields
     // compute vector potential over all faces
-    int ncells1 = indcs.nx1 + 2*(indcs.ng);
+    int ncells1 = (indcs.nx1 > 1)? (indcs.nx1 + 2*(indcs.ng)) : 1;
     int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
     int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
     int nmb = pmbp->nmb_thispack;
@@ -512,47 +540,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
 namespace {
 //----------------------------------------------------------------------------------------
-//! \fn BuildNumericalEjectaDeviceArrays()
-//! \brief Uploads numerical_data (read once from file) into the file-scope DualArrays,
-//! so SetNumericalEjecta can reuse them on every call instead of re-uploading each time.
-  void BuildNumericalEjectaDeviceArrays() {
-    const std::vector<Block>& h_ejecta = numerical_data;
-
-    theta_ej       = DualArray1D<Real>("theta_arr", kNTheta);
-    density_ej     = DualArray2D<Real>("density_arr", kNTheta, kNTime);
-    velocity_ej    = DualArray2D<Real>("velocity_arr", kNTheta, kNTime);
-    temperature_ej = DualArray2D<Real>("temperature_arr", kNTheta, kNTime);
-    time_ej        = DualArray2D<Real>("time_arr", kNTheta, kNTime);
-
-    for (int i = 0; i < static_cast<int>(h_ejecta.size()); i++) {
-      theta_ej.h_view(i) = h_ejecta[i].th;
-    }
-
-    for (int i = 0; i < static_cast<int>(h_ejecta.size()); i++) {
-      for (int j = 0; j < kNTime; j++) {
-        density_ej.h_view(i,j)     = h_ejecta[i].rho[j];
-        velocity_ej.h_view(i,j)    = h_ejecta[i].vel[j];
-        temperature_ej.h_view(i,j) = h_ejecta[i].temperature[j];
-        time_ej.h_view(i,j)        = h_ejecta[i].time[j];
-      }
-    }
-
-    theta_ej.template modify<HostMemSpace>();
-    theta_ej.template sync<DevExeSpace>();
-
-    density_ej.template modify<HostMemSpace>();
-    density_ej.template sync<DevExeSpace>();
-
-    velocity_ej.template modify<HostMemSpace>();
-    velocity_ej.template sync<DevExeSpace>();
-
-    temperature_ej.template modify<HostMemSpace>();
-    temperature_ej.template sync<DevExeSpace>();
-
-    time_ej.template modify<HostMemSpace>();
-    time_ej.template sync<DevExeSpace>();
-  }
-
   void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
     const Real t = pmbp->pmesh->time;
     auto &adm = pmbp->padm->adm;
@@ -561,7 +548,7 @@ namespace {
     int is = indcs.is, js = indcs.js, ks = indcs.ks;
     int nmb = pmbp->nmb_thispack;
     int &ng = indcs.ng;
-    int n1 = indcs.nx1 + 2*ng;
+    int n1 = (indcs.nx1 > 1) ? (indcs.nx1 + 2*ng) : 1;
     int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
     int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
 
@@ -571,10 +558,12 @@ namespace {
 
     // We will construct a switch to let the ejecta expand from the immmerse b.c
     // turning off the expansion before t_num.
-    const Real b = h0/2.0*(1+tanh(t-t0)/(2.0*epsilon));
+    const Real b = h0/2.0*(1+tanh((t-t0)/(2.0*epsilon)));
     const Real a = exp(b*t);
+    // const Real a = 1.0;
+    // const Real b = 0.0;
 
-    par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
+    par_for("update_adm_vars", DevExeSpace(), 0, nmb-1, 0, (n3-1), 0, (n2-1), 0, (n1-1),
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       Real &x1min = size.d_view(m).x1min;
       Real &x1max = size.d_view(m).x1max;
@@ -612,9 +601,10 @@ namespace {
   void SetNumericalEjecta(Mesh* pm, const Real beta_dt) {
 
     MeshBlockPack *pmbp = pm->pmb_pack;
-    const Real t = pmbp->pmesh->time;
+    const Real t_code = pmbp->pmesh->time;
+    Real tau = pmbp->pmesh->dt;
 
-    if (t > t_num || t <= 0.0) return;
+    if (t_code > t_num || t_code <= 0.0) return;
 
     auto &indcs = pmbp->pmesh->mb_indcs;
     int is = indcs.is;
@@ -624,7 +614,6 @@ namespace {
     int je = indcs.je;
     int ke = indcs.ke;
     int nmb = pmbp->nmb_thispack;
-    int nmb1 = nmb - 1;
     auto &size = pmbp->pmb->mb_size;
     auto &adm = pmbp->padm->adm;
 
@@ -634,16 +623,43 @@ namespace {
       DvceArray5D<Real> &u0 = pmbp->pmhd->u0;
 
       const Real r0 = r0_ejecta;
+      const std::vector<Block> h_ejecta = numerical_data;
 
-      // Reuse the device-resident ejecta table built once in
-      // BuildNumericalEjectaDeviceArrays(), instead of rebuilding it every call.
-      DualArray1D<Real> theta_tm = theta_ej;
-      DualArray2D<Real> density_tm = density_ej;
-      DualArray2D<Real> velocity_tm = velocity_ej;
-      DualArray2D<Real> temperature_tm = temperature_ej;
-      DualArray2D<Real> time_tm = time_ej;
+      DualArray1D<Real> theta_tm("theta_arr", kNTheta);
+      DualArray2D<Real> density_tm("density_arr", kNTheta, kNTime);
+      DualArray2D<Real> velocity_tm("velocity_arr", kNTheta, kNTime);
+      DualArray2D<Real> temperature_tm("temperature_arr", kNTheta, kNTime);
+      DualArray2D<Real> time_tm("time_arr", kNTheta, kNTime);
 
-      par_for("numerical_ejecta", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+      for (int i = 0; i < kNTheta; i++) {
+        theta_tm.h_view(i) = h_ejecta[i].th;
+      }
+
+      for (int i = 0; i < kNTheta; i++) {
+        for (int j = 0; j < kNTime; j++) {
+          density_tm.h_view(i,j)     = h_ejecta[i].rho[j];
+          velocity_tm.h_view(i,j)    = h_ejecta[i].v_infty[j];
+          temperature_tm.h_view(i,j) = h_ejecta[i].temperature[j];
+          time_tm.h_view(i,j)        = h_ejecta[i].time[j];
+        }
+      }
+
+      theta_tm.template modify<HostMemSpace>();
+      theta_tm.template sync<DevExeSpace>();
+
+      density_tm.template modify<HostMemSpace>();
+      density_tm.template sync<DevExeSpace>();
+
+      velocity_tm.template modify<HostMemSpace>();
+      velocity_tm.template sync<DevExeSpace>();
+
+      temperature_tm.template modify<HostMemSpace>();
+      temperature_tm.template sync<DevExeSpace>();
+
+      time_tm.template modify<HostMemSpace>();
+      time_tm.template sync<DevExeSpace>();
+
+      par_for("numerical_ejecta", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
         
         Real &x1min = size.d_view(m).x1min;
@@ -664,24 +680,39 @@ namespace {
         Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
         Real x3r = LeftEdgeX(k-ks+1, indcs.nx3, x3min, x3max);
 
+        Real dx1 = size.d_view(m).dx1;
+        Real dx2 = size.d_view(m).dx2;
+        Real dx3 = size.d_view(m).dx3;
+        Real dr = sqrt(SQR(dx1)+SQR(dx2)+SQR(dx3));
+
         Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
         Real rad_l = sqrt(SQR(x1l)+SQR(x2l)+SQR(x3l));
         Real rad_r = sqrt(SQR(x1r)+SQR(x2r)+SQR(x3r));
         Real r_cil = sqrt(SQR(x1v) + SQR(x2v));
 
-        Real th = acos(x3v/rad);
         const Real& alpha = adm.alpha(m, k, j, i);
+        const Real t_cgs = alpha*t_code/2.99792458e5;
 
-        if (rad_l < r0/alpha && rad_r > r0/alpha) {
+        // ((rad_l - dr/2.0) <= r0/alpha && (rad_r + dr/2.0) >= r0/alpha) 
+
+        if (rad <= r0/alpha && rad > 0.0) {
+
+          Real th = acos(Kokkos::fmin(1.0, Kokkos::fmax(-1.0, x3v/rad)));
+
+          Real epsilon_frac = 1.0;
+          // if (rad_l <= r0/alpha && rad_r >= r0/alpha) {
+          //   epsilon_frac = CalcVolFraction(x1l, x1r, x2l, x2r, x3l, x3r, r0/alpha);
+            // We are in the transition region, we need to compute the volume fraction
+          
 
           // Find the four vertex (ith,jt), (ith,jt+1) (ith1,kt), (ith1, kt+1)
           int ith = FindThetaIndex(theta_tm, th);
-          int jt  = FindTimeIndex(ith, time_tm, t);
-          int kt  = FindTimeIndex(ith+1, time_tm, t);
+          int jt  = FindTimeIndex(ith, time_tm, t_cgs);
+          int kt  = FindTimeIndex(ith+1, time_tm, t_cgs);
 
-          Real den = Interpolate2D(ith, jt, kt, theta_tm, time_tm, density_tm, th, t);
-          Real vel = Interpolate2D(ith, jt, kt, theta_tm, time_tm, velocity_tm, th, t);
-          Real temp = Interpolate2D(ith, jt, kt, theta_tm, time_tm, temperature_tm, th, t);
+          Real den = Interpolate2D(ith, jt, kt, theta_tm, time_tm, density_tm, th, t_cgs);
+          Real veloc = Interpolate2D(ith, jt, kt, theta_tm, time_tm, velocity_tm, th, t_cgs);
+          Real temp = Interpolate2D(ith, jt, kt, theta_tm, time_tm, temperature_tm, th, t_cgs);
 
           // We convert from cgs, and K to [M] = g, [L]= km, [c] = 1, and [T] = 1.
           const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
@@ -690,7 +721,7 @@ namespace {
           const Real K_to_1 = 9.251087e-14/mu;
 
           den *= g_cm3_to_g_km3;
-          vel *= cm_s_1;
+          veloc *= cm_s_1;
           temp *= K_to_1 ;
           Real pres = den*temp;
 
@@ -701,16 +732,16 @@ namespace {
           if (r_cil == 0) {
             wvx = 0.0;
             wvy = 0.0;
-            wvz = vel * x3v / r0;
-            Real Gamma0 = 1.0/sqrt(1-SQR(wvx)-SQR(wvy)-SQR(wvz));
+            wvz = veloc * x3v / rad;
+            Real Gamma0 = 1.0/sqrt(1.0-SQR(wvx)-SQR(wvy)-SQR(wvz));
             wvx *= Gamma0 / alpha;
             wvy *= Gamma0/ alpha;
             wvz *= Gamma0 / alpha;
           } else {
-            wvx = vel * x1v / r0;
-            wvy = vel * x2v / r0;
-            wvz = vel * x3v / r0;
-            Real Gamma0 = 1.0/sqrt(1-SQR(wvx)-SQR(wvy)-SQR(wvz));
+            wvx = veloc * x1v / rad;
+            wvy = veloc * x2v / rad;
+            wvz = veloc * x3v / rad;
+            Real Gamma0 = 1.0/sqrt(1.0-SQR(wvx)-SQR(wvy)-SQR(wvz));
             wvx *= Gamma0 / alpha;
             wvy *= Gamma0 / alpha;
             wvz *= Gamma0 / alpha;
@@ -729,6 +760,17 @@ namespace {
 
           Real v[3] = {wvx, wvy, wvz};
           Real v2 = Primitive::SquareVector(v, g3d);
+
+          // if (1.0 - v2 <= 0) {
+          //   std::cout << "The velocity is superluminal!" << std::endl
+          //             << "Attempting to adjust..." << std::endl;
+          //   Real fac = Kokkos::sqrt((1.0 - 1e-15)/v2);
+          //   wvx *= fac;
+          //   wvy *= fac;
+          //   wvz *= fac;
+          //   v2 = 1.0 - 1.0e-15;
+          // }
+
           Real w = sqrt(1.0 + v2); 
 
           // In addition we lower wv^i:
@@ -746,20 +788,19 @@ namespace {
           u0_or[3] = u0(m,IM3,k,j,i);
           u0_or[4] = u0(m,IEN,k,j,i);
 
-          Real h = gamma/(gamma-1) * pres/den;
+          Real h = 1.0 + (gamma-1.0)/gamma * pres/den;
 
           u0_eq[0] = vol*w*den;
           u0_eq[1] = vol*den*h*w*wv_x;
           u0_eq[2] = vol*den*h*w*wv_y;
           u0_eq[3] = vol*den*h*w*wv_z;
-          u0_eq[4] = vol*(den*h*w*w - pres - u0_eq[0]); 
+          u0_eq[4] = vol*(den*h*w*w - pres - w*den); 
 
-          Real tau = pmbp->pmesh->dt;
-          u0(m,IDN,k,j,i) += -alpha*vol*beta_dt*(u0_or[0] - u0_eq[0])/tau;
-          u0(m,IM1,k,j,i) += -alpha*vol*beta_dt*(u0_or[1] - u0_eq[1])/tau;
-          u0(m,IM2,k,j,i) += -alpha*vol*beta_dt*(u0_or[2] - u0_eq[2])/tau;
-          u0(m,IM3,k,j,i) += -alpha*vol*beta_dt*(u0_or[3] - u0_eq[3])/tau;
-          u0(m,IEN,k,j,i) += -alpha*vol*beta_dt*(u0_or[4] - u0_eq[4])/tau;
+          u0(m,IDN,k,j,i) += -alpha*vol*beta_dt*(u0_or[0] - u0_eq[0])/tau * epsilon_frac;
+          u0(m,IM1,k,j,i) += -alpha*vol*beta_dt*(u0_or[1] - u0_eq[1])/tau * epsilon_frac;
+          u0(m,IM2,k,j,i) += -alpha*vol*beta_dt*(u0_or[2] - u0_eq[2])/tau * epsilon_frac;
+          u0(m,IM3,k,j,i) += -alpha*vol*beta_dt*(u0_or[3] - u0_eq[3])/tau * epsilon_frac;
+          u0(m,IEN,k,j,i) += -alpha*vol*beta_dt*(u0_or[4] - u0_eq[4])/tau * epsilon_frac;
         }
       });
     }
