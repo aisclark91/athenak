@@ -4,17 +4,13 @@
 #include <fstream>
 #include <cstdlib>
 #include "athena.hpp"
-//#include "parameter_input.hpp"
 
 struct Block {
   Real th;
   std::vector<Real> time;
-  std::vector<Real> vel;
-  std::vector<Real> rho;
-  std::vector<Real> entropy;
-  std::vector<Real> temperature;
-  std::vector<Real> ye;
   std::vector<Real> v_infty;
+  std::vector<Real> mdot;
+  std::vector<Real> temperature;
 };
 
 class NumericalEjectaData {
@@ -33,7 +29,7 @@ class NumericalEjectaData {
 
         // Discard the first 9 metadata lines
       std::string dummy;
-      for (size_t i = 0; i < 9; i++) {
+      for (size_t i = 0; i < 6; i++) {
         if (!std::getline(file, dummy)) {
           std::cerr << "File ended before metadata was finished\n";
           std::exit(EXIT_FAILURE);
@@ -54,12 +50,9 @@ class NumericalEjectaData {
         std::getline(file, leftover);
         if (!(file >> b.th)) break;
         if (!readArray(b.time, n_tm)) break;
-        if (!readArray(b.vel, n_tm)) break;
-        if (!readArray(b.rho, n_tm)) break;
-        if (!readArray(b.entropy, n_tm)) break;
-        if (!readArray(b.temperature, n_tm)) break;
-        if (!readArray(b.ye, n_tm)) break;
         if (!readArray(b.v_infty, n_tm)) break;
+        if (!readArray(b.mdot, n_tm)) break;
+        if (!readArray(b.temperature, n_tm)) break;
         data.push_back(std::move(b));
       }
   };

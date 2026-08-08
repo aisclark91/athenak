@@ -37,6 +37,7 @@ namespace {
   Real h0;
   bool is_expanding;
   Real epsilon_h0;
+  Real t_exp_max;
 
   // Central Engine Variables:
   // Real t_eng;
@@ -67,46 +68,6 @@ KOKKOS_INLINE_FUNCTION
 Real Interpolate1D(Real &var_i, Real &var_i1, Real &x_i, Real &x_i1, Real &x) {
   Real m = (var_i1 - var_i)/(x_i1 - x_i);
   return m*(x - x_i) + var_i;
-}
-
-
-KOKKOS_INLINE_FUNCTION
-Real Interpolate2D(int ith, int jt, int kt, const DualArray1D<Real> &theta, const DualArray2D<Real> &time, 
-  const DualArray2D<Real>& var_ej, Real th, Real t) {
-
-  Real th_i = theta.d_view(ith);
-  Real th_i1 = theta.d_view(ith+1);
-  
-  Real tm_j = time.d_view(ith, jt);
-  Real tm_j1 = time.d_view(ith, jt+1);
-  Real var_ij = var_ej.d_view(ith, jt);
-  Real var_ij1 = var_ej.d_view(ith,jt+1);
-  
-  Real var_i;
-  if (tm_j >= t && tm_j1 >= t) {
-    var_i = var_ij;        // t before first sample -> hold first value
-  } else if (tm_j < t && tm_j1 < t) {
-    var_i = var_ij1;        // t past last sample -> hold last value
-  } else {
-    var_i = Interpolate1D(var_ij, var_ij1, tm_j, tm_j1, t);
-  }
-    
-  Real tm_k = time.d_view(ith+1, kt);
-  Real tm_k1 = time.d_view(ith+1, kt+1);
-  Real var_ik = var_ej.d_view(ith+1, kt);
-  Real var_ik1 = var_ej.d_view(ith+1,kt+1);
-
-  Real var_i1;
-  if (tm_k >= t && tm_k1 >= t) {
-    var_i1 = var_ik;        // t before first sample -> hold first value
-  } else if (tm_k < t && tm_k1 < t) {
-    var_i1 = var_ik1;        // t past last sample -> hold last value
-  } else {
-    var_i1 = Interpolate1D(var_ik, var_ik1, tm_k, tm_k1, t);
-  }
-
-  Real var = Interpolate1D(var_i, var_i1, th_i, th_i1, th);
-  return var;
 }
 
 
@@ -156,6 +117,58 @@ int FindThetaIndex(const DualArray1D<Real> &theta, Real th) {
   }
 
   return index;
+}
+
+
+KOKKOS_INLINE_FUNCTION
+Real Interpolate2D(const DualArray1D<Real> &theta, const DualArray2D<Real> &time, 
+  const DualArray2D<Real>& var_ej, Real index, Real th, Real t) {
+
+  Real var;
+  int size = time.view_device().extent(1);  
+  int ith = FindThetaIndex(theta, th);
+  int jt  = FindTimeIndex(ith, time, t);
+  int kt  = FindTimeIndex(ith+1, time, t);
+  
+  Real jtmax = time.d_view(ith, size-1);
+  Real ktmax = time.d_view(ith+1, size-1);
+
+  Real th_i = theta.d_view(ith);
+  Real tm_j = time.d_view(ith, jt);
+  Real tm_j1 = time.d_view(ith, jt+1);
+  Real var_i;
+
+  if(t <= tm_j) {
+    Real var_ij = var_ej.d_view(ith, jt);
+    var_i = var_ij;
+  } else if(t > tm_j && t < jtmax) {
+    Real var_ij = var_ej.d_view(ith, jt);
+    Real var_ij1 = var_ej.d_view(ith,jt+1);
+    var_i = Interpolate1D(var_ij, var_ij1, tm_j, tm_j1, t);
+  } else {
+    Real var_ij1 = var_ej.d_view(ith,jt+1);
+    var_i = var_ij1 * Kokkos::pow(t/jtmax, index);
+  }
+
+  Real th_i1 = theta.d_view(ith+1);
+  Real tm_k = time.d_view(ith+1, kt);
+  Real tm_k1 = time.d_view(ith+1, kt+1);
+  Real var_i1;
+
+  if(t <= tm_k) {
+    Real var_ik = var_ej.d_view(ith+1, kt);
+    var_i1 = var_ik;
+  } else if(t > tm_k && t < ktmax) {
+    Real var_ik = var_ej.d_view(ith+1, kt);
+    Real var_ik1 = var_ej.d_view(ith+1,kt+1);
+    var_i1 = Interpolate1D(var_ik, var_ik1, tm_k, tm_k1, t);
+  } else {
+    Real var_ik1 = var_ej.d_view(ith+1,kt+1);
+    var_i1 = var_ik1 * Kokkos::pow(t/ktmax, index);
+  }
+
+  var = Interpolate1D(var_i, var_i1, th_i, th_i1, th);
+  return var;
 }
 
 
@@ -218,6 +231,8 @@ Real CalcVolFraction(Real x1min, Real x1max, Real x2min, Real x2max, Real x3min,
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   is_expanding = pin->GetOrAddBoolean("problem", "is_expanding", true);
+
+  t_exp_max = pin->GetReal("problem", "t_exp_max");
   
   // Maximum velocity of the expansion
   Real vmax = pin->GetReal("problem", "vmax");
@@ -308,10 +323,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     auto& w0_ = pmbp->pmhd->w0;
 
     DualArray1D<Real> theta_ej("theta_arr", kNTheta);
-    DualArray2D<Real> density_ej("density_arr", kNTheta, kNTime);
-    DualArray2D<Real> velocity_ej("velocity_arr", kNTheta, kNTime);
-    DualArray2D<Real> temperature_ej("temperature_arr", kNTheta, kNTime);
     DualArray2D<Real> time_ej("time_arr", kNTheta, kNTime);
+    DualArray2D<Real> vinfty_ej("velocity_arr", kNTheta, kNTime);
+    DualArray2D<Real> mdot_ej("mdot_arr", kNTheta, kNTime);
+    DualArray2D<Real> temp_ej("temperature_arr", kNTheta, kNTime);
+
 
     for (int i = 0; i < kNTheta; i++) {
       theta_ej.h_view(i) = h_ejecta[i].th;
@@ -319,27 +335,27 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
     for (int i = 0; i < kNTheta; i++) {
       for (int j = 0; j < kNTime; j++) {
-        density_ej.h_view(i,j)     = h_ejecta[i].rho[j];
-        velocity_ej.h_view(i,j)    = h_ejecta[i].v_infty[j];
-        temperature_ej.h_view(i,j) = h_ejecta[i].temperature[j];
-        time_ej.h_view(i,j)        = h_ejecta[i].time[j];
+        time_ej.h_view(i,j)   = h_ejecta[i].time[j];
+        vinfty_ej.h_view(i,j) = h_ejecta[i].v_infty[j];
+        mdot_ej.h_view(i,j)   = h_ejecta[i].mdot[j];
+        temp_ej.h_view(i,j)   = h_ejecta[i].temperature[j];
       }
     }
 
     theta_ej.template modify<HostMemSpace>();
     theta_ej.template sync<DevExeSpace>();
 
-    density_ej.template modify<HostMemSpace>();
-    density_ej.template sync<DevExeSpace>();
-
-    velocity_ej.template modify<HostMemSpace>();
-    velocity_ej.template sync<DevExeSpace>();
-
-    temperature_ej.template modify<HostMemSpace>();
-    temperature_ej.template sync<DevExeSpace>();
-
     time_ej.template modify<HostMemSpace>();
     time_ej.template sync<DevExeSpace>();
+
+    vinfty_ej.template modify<HostMemSpace>();
+    vinfty_ej.template sync<DevExeSpace>();
+
+    mdot_ej.template modify<HostMemSpace>();
+    mdot_ej.template sync<DevExeSpace>();
+
+    temp_ej.template modify<HostMemSpace>();
+    temp_ej.template sync<DevExeSpace>();
 
     par_for("pgen_blast1",DevExeSpace(),0,(pmbp->nmb_thispack-1),ks,ke,js,je,is,ie,
     KOKKOS_LAMBDA(int m,int k,int j,int i) {
@@ -386,15 +402,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       if(rad <= r0 && rad > 0.0) {
 
         Real th = acos(Kokkos::fmin(1.0, Kokkos::fmax(-1.0, x3v/rad)));
+        Real mdot = Interpolate2D(theta_ej, time_ej, mdot_ej, -0.5, th, 0.0);
+        veloc = Interpolate2D(theta_ej, time_ej, vinfty_ej, -0.1, th, 0.0);
+        Real gamma = 1.0/sqrt(1.0 - SQR(veloc/2.99792458e10));
+        den = mdot/(4*M_PI*SQR(r0*1.0e5)*gamma*veloc);
+        temp = Interpolate2D(theta_ej, time_ej, temp_ej, 0.0, th, 0.0);
 
-        int ith = FindThetaIndex(theta_ej, th);
-        int jt  = FindTimeIndex(ith, time_ej, 0.0);
-        int kt  = FindTimeIndex(ith+1, time_ej, 0.0);
-
-        den = Interpolate2D(ith, jt, kt, theta_ej, time_ej, density_ej, th, 0.0);
-        veloc = Interpolate2D(ith, jt, kt, theta_ej, time_ej, velocity_ej, th, 0.0);
-        temp = Interpolate2D(ith, jt, kt, theta_ej, time_ej, temperature_ej, th, 0.0);
-      
         // Finally we convert to the right code units
         const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
         const Real g_cm3_to_g_km3 = 1.0e15;
@@ -553,13 +566,13 @@ namespace {
     int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
 
     // Set expanding metric variables for the current mesh time
-    const Real t0 = t_num;
+    const Real t0 = t_exp_max;
     const Real epsilon = epsilon_h0;
 
     // We will construct a switch to let the ejecta expand from the immmerse b.c
-    // turning off the expansion before t_num.
+    // turning off the expansion before t_exp_max.
     const Real b = h0/2.0*(1+tanh((t-t0)/(2.0*epsilon)));
-    const Real a = exp(b*t);
+    const Real a = exp(h0*t/2.0)*pow(cosh((t-t0)/(2.0*epsilon))/cosh(t0/(2.0*epsilon)), h0*epsilon);
     // const Real a = 1.0;
     // const Real b = 0.0;
 
@@ -626,10 +639,10 @@ namespace {
       const std::vector<Block> h_ejecta = numerical_data;
 
       DualArray1D<Real> theta_tm("theta_arr", kNTheta);
-      DualArray2D<Real> density_tm("density_arr", kNTheta, kNTime);
-      DualArray2D<Real> velocity_tm("velocity_arr", kNTheta, kNTime);
-      DualArray2D<Real> temperature_tm("temperature_arr", kNTheta, kNTime);
       DualArray2D<Real> time_tm("time_arr", kNTheta, kNTime);
+      DualArray2D<Real> vinfty_tm("velocity_arr", kNTheta, kNTime);
+      DualArray2D<Real> mdot_tm("mdot_arr", kNTheta, kNTime);
+      DualArray2D<Real> temp_tm("temperature_arr", kNTheta, kNTime);
 
       for (int i = 0; i < kNTheta; i++) {
         theta_tm.h_view(i) = h_ejecta[i].th;
@@ -637,27 +650,27 @@ namespace {
 
       for (int i = 0; i < kNTheta; i++) {
         for (int j = 0; j < kNTime; j++) {
-          density_tm.h_view(i,j)     = h_ejecta[i].rho[j];
-          velocity_tm.h_view(i,j)    = h_ejecta[i].v_infty[j];
-          temperature_tm.h_view(i,j) = h_ejecta[i].temperature[j];
-          time_tm.h_view(i,j)        = h_ejecta[i].time[j];
+          time_tm.h_view(i,j)   = h_ejecta[i].time[j];
+          vinfty_tm.h_view(i,j) = h_ejecta[i].v_infty[j];
+          mdot_tm.h_view(i,j)   = h_ejecta[i].mdot[j];
+          temp_tm.h_view(i,j)   = h_ejecta[i].temperature[j];
         }
       }
 
       theta_tm.template modify<HostMemSpace>();
       theta_tm.template sync<DevExeSpace>();
 
-      density_tm.template modify<HostMemSpace>();
-      density_tm.template sync<DevExeSpace>();
-
-      velocity_tm.template modify<HostMemSpace>();
-      velocity_tm.template sync<DevExeSpace>();
-
-      temperature_tm.template modify<HostMemSpace>();
-      temperature_tm.template sync<DevExeSpace>();
-
       time_tm.template modify<HostMemSpace>();
       time_tm.template sync<DevExeSpace>();
+
+      vinfty_tm.template modify<HostMemSpace>();
+      vinfty_tm.template sync<DevExeSpace>();
+
+      mdot_tm.template modify<HostMemSpace>();
+      mdot_tm.template sync<DevExeSpace>();
+
+      temp_tm.template modify<HostMemSpace>();
+      temp_tm.template sync<DevExeSpace>(); 
 
       par_for("numerical_ejecta", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -706,13 +719,11 @@ namespace {
           
 
           // Find the four vertex (ith,jt), (ith,jt+1) (ith1,kt), (ith1, kt+1)
-          int ith = FindThetaIndex(theta_tm, th);
-          int jt  = FindTimeIndex(ith, time_tm, t_cgs);
-          int kt  = FindTimeIndex(ith+1, time_tm, t_cgs);
-
-          Real den = Interpolate2D(ith, jt, kt, theta_tm, time_tm, density_tm, th, t_cgs);
-          Real veloc = Interpolate2D(ith, jt, kt, theta_tm, time_tm, velocity_tm, th, t_cgs);
-          Real temp = Interpolate2D(ith, jt, kt, theta_tm, time_tm, temperature_tm, th, t_cgs);
+          Real mdot = Interpolate2D(theta_tm, time_tm, mdot_tm, -1.6666666, th, t_cgs);
+          Real veloc = Interpolate2D(theta_tm, time_tm, vinfty_tm, -0.25, th, t_cgs);
+          Real gamma = 1.0/sqrt(1.0 - SQR(veloc/2.99792458e10));
+          Real den = mdot/(4*M_PI*SQR(r0*1.0e5)*gamma*veloc);
+          Real temp = Interpolate2D(theta_tm, time_tm, temp_tm, 0.0, th, t_cgs);
 
           // We convert from cgs, and K to [M] = g, [L]= km, [c] = 1, and [T] = 1.
           const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
