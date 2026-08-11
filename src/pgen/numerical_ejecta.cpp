@@ -224,6 +224,21 @@ Real CalcVolFraction(Real x1min, Real x1max, Real x2min, Real x2max, Real x3min,
 }
 
 
+KOKKOS_INLINE_FUNCTION
+Real TransitionEpsilon(Real dr, Real r0, Real rad) {
+  // Instead of using a geometrical epsilon factor, we may use an smooth
+  // activation function at r=r0 of a few dr in size with compact support
+  Real var;
+  if(rad <=(r0-dr)) {
+    var = 1.0;
+  } else if (rad>(r0-dr) && rad<(r0+dr)) {
+    var = 0.5*(1.0 - Kokkos::sin(M_PI*(rad - r0)/(2.0*dr)));
+  } else {
+    var = 0.0;
+  }
+  return var;
+}
+
 //----------------------------------------------------------------------------------------
 //! \fn ProblemGenerator::UserProblem_()
 //! \brief Problem Generator for spherical blast problem
@@ -395,28 +410,28 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real wvx;
       Real wvy;
       Real wvz;
-      Real temp;
+      Real pres;
 
-      //((rad_l - dr/2.0) <= r0 && (rad_r + dr/2.0)>= r0) 
-  
+      const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
+      const Real g_cm3_to_g_km3 = 1.0e15;
+      const Real cm_s_1 = 3.335641e-11;
+      const Real K_to_1 = 9.251087e-14/mu;
+      const Real dyne_to_g_km3 = 1.1126500560536184e-6;
+
       if(rad <= r0 && rad > 0.0) {
-
+        // We extract the density, veloc and pressure in cgs units.
         Real th = acos(Kokkos::fmin(1.0, Kokkos::fmax(-1.0, x3v/rad)));
         Real mdot = Interpolate2D(theta_ej, time_ej, mdot_ej, -0.5, th, 0.0);
         veloc = Interpolate2D(theta_ej, time_ej, vinfty_ej, -0.1, th, 0.0);
         Real gamma = 1.0/sqrt(1.0 - SQR(veloc/2.99792458e10));
         den = mdot/(4*M_PI*SQR(r0*1.0e5)*gamma*veloc);
-        temp = Interpolate2D(theta_ej, time_ej, temp_ej, 0.0, th, 0.0);
+        Real temp = Interpolate2D(theta_ej, time_ej, temp_ej, -0.2, th, 0.0);
+        pres = 7.56573325e-15*pow(temp, 4);
 
         // Finally we convert to the right code units
-        const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
-        const Real g_cm3_to_g_km3 = 1.0e15;
-        const Real cm_s_1 = 3.335641e-11;
-        const Real K_to_1 = 9.251087e-14/mu;
-
         den *= g_cm3_to_g_km3;
         veloc *= cm_s_1;
-        temp *= K_to_1;
+        pres *= dyne_to_g_km3;
 
         if (r_cil == 0) {
           wvx = 0.0;
@@ -449,10 +464,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
         wvx = 0.0;
         wvy = 0.0;
         wvz = 0.0;
-        temp = temp_ism; 
+        Real temp = temp_ism/K_to_1; 
+        pres = 7.56573325e-15*pow(temp, 4);
+        pres *= dyne_to_g_km3;
       } 
-
-      Real pres = temp*den; 
 
       w0_(m,IDN,k,j,i) = den;
       w0_(m,IVX,k,j,i) = wvx;
@@ -708,33 +723,34 @@ namespace {
 
         // ((rad_l - dr/2.0) <= r0/alpha && (rad_r + dr/2.0) >= r0/alpha) 
 
-        if (rad <= r0/alpha && rad > 0.0) {
+        if (rad <= (r0+2.0*dr)/alpha && rad > 0.0) {
 
           Real th = acos(Kokkos::fmin(1.0, Kokkos::fmax(-1.0, x3v/rad)));
 
-          Real epsilon_frac = 1.0;
+          Real epsilon_frac = TransitionEpsilon(dr/alpha, r0/alpha, rad);
+
           // if (rad_l <= r0/alpha && rad_r >= r0/alpha) {
           //   epsilon_frac = CalcVolFraction(x1l, x1r, x2l, x2r, x3l, x3r, r0/alpha);
             // We are in the transition region, we need to compute the volume fraction
           
-
           // Find the four vertex (ith,jt), (ith,jt+1) (ith1,kt), (ith1, kt+1)
-          Real mdot = Interpolate2D(theta_tm, time_tm, mdot_tm, -1.6666666, th, t_cgs);
-          Real veloc = Interpolate2D(theta_tm, time_tm, vinfty_tm, -0.25, th, t_cgs);
+          Real mdot = Interpolate2D(theta_tm, time_tm, mdot_tm, -0.5, th, t_cgs);
+          Real veloc = Interpolate2D(theta_tm, time_tm, vinfty_tm, -0.1, th, t_cgs);
           Real gamma = 1.0/sqrt(1.0 - SQR(veloc/2.99792458e10));
           Real den = mdot/(4*M_PI*SQR(r0*1.0e5)*gamma*veloc);
-          Real temp = Interpolate2D(theta_tm, time_tm, temp_tm, 0.0, th, t_cgs);
+          Real temp = Interpolate2D(theta_tm, time_tm, temp_tm, -0.2, th, t_cgs);
+          Real pres = 7.56573325e-15*pow(temp, 4);
 
           // We convert from cgs, and K to [M] = g, [L]= km, [c] = 1, and [T] = 1.
           const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
           const Real g_cm3_to_g_km3 = 1.0e15;
           const Real cm_s_1 = 3.335641e-11;
           const Real K_to_1 = 9.251087e-14/mu;
+          const Real dyne_to_g_km3 = 1.1126500560536184e-6;
 
           den *= g_cm3_to_g_km3;
           veloc *= cm_s_1;
-          temp *= K_to_1 ;
-          Real pres = den*temp;
+          pres *= dyne_to_g_km3;
 
           Real wvx;
           Real wvy;
