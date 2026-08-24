@@ -16,10 +16,12 @@ struct Block {
 class NumericalEjectaData {
   private:
    std::vector<Block> data;
+   size_t n_th;
+   size_t n_tm;
 
   public:
 
-    NumericalEjectaData(std::string filename, const size_t &n_th, const size_t n_tm) {
+    NumericalEjectaData(std::string filename) {
 
       std::ifstream file(filename);
       if (!file) {
@@ -27,8 +29,26 @@ class NumericalEjectaData {
         std::exit(EXIT_FAILURE);
       }
 
-        // Discard the first 9 metadata lines
       std::string dummy;
+
+      // Discard the "#thsize" and "#tsize" label lines, then read the two
+      // integers that follow them: the total number of blocks (n_th) and
+      // the number of time samples per block (n_tm).
+      for (size_t i = 0; i < 2; i++) {
+        if (!std::getline(file, dummy)) {
+          std::cerr << "File ended before metadata was finished\n";
+          std::exit(EXIT_FAILURE);
+        }
+      }
+
+      if (!(file >> n_th) || !(file >> n_tm)) {
+        std::cerr << "Could not read n_th and n_tm from file\n";
+        std::exit(EXIT_FAILURE);
+      }
+
+      // Consume the rest of the n_tm line, then discard the remaining
+      // 5 column-label lines ("#theta", "#time", "#mdot", "#vinfty",
+      // "#temperature").
       for (size_t i = 0; i < 6; i++) {
         if (!std::getline(file, dummy)) {
           std::cerr << "File ended before metadata was finished\n";
@@ -59,5 +79,13 @@ class NumericalEjectaData {
 
   std::vector<Block> ComputeBlocks() {
     return data;
+  }
+
+  size_t thsize() {
+    return n_th;
+  }
+
+  size_t tsize() {
+    return n_tm;
   }
 };
