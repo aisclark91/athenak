@@ -23,6 +23,7 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "z4c/z4c.hpp"
+#include "nuclear/nuclear.hpp"
 #include "diffusion/viscosity.hpp"
 #include "diffusion/resistivity.hpp"
 #include "diffusion/conduction.hpp"
@@ -646,6 +647,10 @@ void Mesh::NewTimeStep(const Real tlim) {
   // Particles timestep
   if (pmb_pack->ppart != nullptr) {
     dt_cycle = std::min(dt_cycle, (pmb_pack->ppart->dtnew) );
+  }
+  // Nuclear timestep
+  if (pmb_pack->pnuc != nullptr) {
+    dt_cycle = std::min(dt_cycle, (pmb_pack->pnuc->dtnew) );
   }
 
 #if MPI_PARALLEL_ENABLED

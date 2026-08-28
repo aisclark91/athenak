@@ -100,6 +100,11 @@ add_executable(
         mhd/mhd_tasks.cpp
         mhd/mhd_update.cpp
 
+        nuclear/nuclear.cpp
+        nuclear/nuclear_integrate.cpp
+        nuclear/nuclear_task.cpp
+        nuclear/nuclear_timestep.cpp
+
         outputs/io_wrapper.cpp
         outputs/outputs.cpp
         outputs/basetype_output.cpp
