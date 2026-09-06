@@ -33,7 +33,7 @@
 namespace {
   // Expansion:
   Real h0;
-  Real delta_vel_ej;
+  Real mask_tol_ej;
   Real delta_mdot_ej;
   bool is_expanding;
   Real epsilon_h0;
@@ -213,7 +213,7 @@ Real Interpolate2D(const DualArray1D<Real> &theta, const DualArray2D<Real> &time
 
 
 KOKKOS_INLINE_FUNCTION
-Real TransitionEpsilon(Real epsilon_tol, Real r0, Real rad) {
+Real TransitionEpsilon(const Real &epsilon_tol, const Real &r0, const Real &rad) {
   // Smooth bump function with compact support: defined (and nonzero) only
   // for (rad - r0) in (-epsilon_tol, +epsilon_tol), i.e. a radial band of
   // half-width epsilon_tol straddling r=r0, and identically zero everywhere
@@ -221,11 +221,9 @@ Real TransitionEpsilon(Real epsilon_tol, Real r0, Real rad) {
   // r=r0 rather than filling its entire interior.
   Real var;
   Real dist = rad - r0;
-  if (dist > -epsilon_tol && dist < epsilon_tol) {
-    var = SQR(Kokkos::cos(0.5*M_PI*dist/epsilon_tol));
-  } else {
-    var = 0.0;
-  }
+  Real eps_inv = 1.0/epsilon_tol;
+  Real s = fmin(fmax(dist*eps_inv, -1.0), 1.0);
+  var =  0.5*(1.0 - s - M_1_PI*sin(M_PI*s)); 
   return var;
 }
 
@@ -241,7 +239,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   nu_temp_ej = pin->GetReal("problem", "nu_temp");
 
   delta_mdot_ej = pin->GetReal("problem", "delta_mdot_ej");
-  delta_vel_ej  = pin->GetReal("problem", "delta_vel_ej");
+  mask_tol_ej  = pin->GetReal("problem", "mask_tol_ej");
 
   is_expanding = pin->GetOrAddBoolean("problem", "is_expanding", true);
 
@@ -344,7 +342,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     const Real nu_vel = nu_vel_ej;
     const Real nu_temp = nu_temp_ej;
     const Real delta_mdot = delta_mdot_ej;
-    const Real delta_vel = delta_vel_ej;
+    const Real mask_tol = mask_tol_ej;
     const int kNTheta = kNTheta_ej;
     const int kNTime = kNTime_ej;
     // We define the primitive variables:
@@ -422,6 +420,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real wvx;
       Real wvy;
       Real wvz;
+      Real w;
       Real pres;
 
       const Real cm_to_km = 1.0e-5;
@@ -435,12 +434,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
       const Real g_cm3_to_g_km3 = 1.0/(cm_to_km*cm_to_km*cm_to_km);
       const Real cm_s_1 = 1/c_cgs;
-      const Real K_to_1 = units::Units::k_boltzmann_cgs*SQR(cm_s_1)/(mu*units::Units::atomic_mass_unit_cgs);
+      const Real K_to_1 = units::Units::k_boltzmann_cgs*SQR(cm_s_1)/
+                              (mu*units::Units::atomic_mass_unit_cgs);
       const Real dyne_to_g_km3 = 1/SQR(c_cgs)*g_cm3_to_g_km3;
 
       Real band = epsilon_tol * dl;
       Real epsilon_frac = TransitionEpsilon(band, r0, rad);
-      if (epsilon_frac > 1.0e-3) {
+      if (epsilon_frac > mask_tol) {
         
         Real th = acos(Kokkos::fmin(1.0, Kokkos::fmax(-1.0, x3v/rad)));
       
@@ -452,8 +452,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
         }
 
         Real veloc = Interpolate2D(theta_ej, time_ej, vinfty_ej, nu_vel, th, 0.0);
-        Real gamma = 1.0/sqrt(1.0 - SQR(veloc/c_cgs));
-        den = mdot/(4*M_PI*SQR(rad*km_to_cm)*gamma*veloc);
+        w = 1.0/sqrt(1.0 - SQR(veloc/c_cgs));
+        den = mdot/(4*M_PI*SQR(rad*km_to_cm)*w*veloc);
         Real temp = Interpolate2D(theta_ej, time_ej, temp_ej, nu_temp, th, 0.0);
         pres = a_cgs*pow(temp, 4)/3.0;
 
@@ -461,38 +461,31 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
         veloc *= cm_s_1;
         pres *= dyne_to_g_km3;
 
-        if (r_cil == 0) {
+        if (r_cil > 0.0) {
+          wvx = veloc * x1v / rad;
+          wvy = veloc * x2v / rad;
+          wvz = veloc * x3v / rad;
+          wvx *= w;
+          wvy *= w;
+          wvz *= w;
+        } else {
           wvx = 0.0;
           wvy = 0.0;
           wvz = veloc * x3v / rad;
-          Real Gamma0 = 1.0/sqrt(1.0-SQR(wvx)-SQR(wvy)-SQR(wvz));
-          wvx *= Gamma0;
-          wvy *= Gamma0;
-          wvz *= Gamma0;
-        } else {
-          wvx = veloc * (1.0 + delta_vel*x2v/r_cil) * x1v / rad;
-          wvy = veloc * (1.0 + delta_vel*x2v/r_cil) * x2v / rad;
-          wvz = veloc * (1.0 + delta_vel*x2v/r_cil) * x3v / rad;
-          Real Gamma0 = 1.0/sqrt(1.0-SQR(wvx)-SQR(wvy)-SQR(wvz));
-          wvx *= Gamma0;
-          wvy *= Gamma0;
-          wvz *= Gamma0;
+          wvz *= w;
         }
+
       } else {
-        if(rad > r0) {
-          if (power_law) {
-            Real log_k1  = log(d_ism) + n_ism*log(r0);
-            Real log_rho = log_k1 - n_ism*log(rad);
-            den = exp(log_rho);
-          } else if (exponential) {
-            Real log_rho = log(d_ism) - (rad-r0)/tau_ism;
-            den = exp(log_rho);
-          } else if (constant) {
-            den = d_ism;
-          }
-        } else {
+        if (power_law) {
+          Real log_k1  = log(d_ism) + n_ism*log(r0);
+          Real log_rho = log_k1 - n_ism*log(rad);
+          den = exp(log_rho);
+        } else if (exponential) {
+          Real log_rho = log(d_ism) - (rad-r0)/tau_ism;
+          den = exp(log_rho);
+        } else if (constant) {
           den = d_ism;
-        }
+        }          
         wvx = 0.0;
         wvy = 0.0;
         wvz = 0.0;
@@ -616,10 +609,17 @@ namespace {
     const Real t0 = t_exp_max;
     const Real epsilon = epsilon_h0;
 
+    Real x = (t-t0)/(2*epsilon);
+    Real y = t0/(2*epsilon);
+    Real log_cosh_x = abs(x) + log1p(exp(-2.0*abs(x)));
+    Real log_cosh_y = abs(y) + log1p(exp(-2.0*abs(y)));
+    Real exponent = h0*t/2 + h0*epsilon*(log_cosh_x - log_cosh_y);
+    const Real a = exp(exponent);
+    const Real b = h0/2.0*(1+tanh((t-t0)/(2.0*epsilon)));
     // We will construct a switch to let the ejecta expand from the immmerse b.c
     // turning off the expansion before t_exp_max.
-    const Real b = h0/2.0*(1+tanh((t-t0)/(2.0*epsilon)));
-    const Real a = exp(h0*t/2.0)*pow(cosh((t-t0)/(2.0*epsilon))/cosh(t0/(2.0*epsilon)), h0*epsilon);
+    // const Real b = h0/2.0*(1+tanh((t-t0)/(2.0*epsilon)));
+    // const Real a = exp(h0*t/2.0)*pow(cosh((t-t0)/(2.0*epsilon))/cosh(t0/(2.0*epsilon)), h0*epsilon);
     // const Real a = 1.0;
     // const Real b = 0.0;
 
@@ -662,7 +662,8 @@ namespace {
 
     MeshBlockPack *pmbp = pm->pmb_pack;
     const Real t_code = pmbp->pmesh->time;
-    Real tau = pmbp->pmesh->dt;
+    //Real tau = pmbp->pmesh->dt;
+    Real tau = beta_dt/5.0;
 
     auto &indcs = pmbp->pmesh->mb_indcs;
     int is = indcs.is;
@@ -673,7 +674,6 @@ namespace {
     int ke = indcs.ke;
     int nmb = pmbp->nmb_thispack;
     auto &size = pmbp->pmb->mb_size;
-    auto &adm = pmbp->padm->adm;
 
     if (pmbp->pmhd != nullptr) {
       EOS_Data &eos = pmbp->pmhd->peos->eos_data;
@@ -689,7 +689,7 @@ namespace {
       const Real nu_vel = nu_vel_ej;
       const Real nu_temp = nu_temp_ej;
       const Real delta_mdot = delta_mdot_ej;
-      const Real delta_vel = delta_vel_ej;
+      const Real mask_tol = mask_tol_ej;
 
       DualArray1D<Real> theta_tm("theta_arr", kNTheta);
       DualArray2D<Real> time_tm("time_arr", kNTheta, kNTime);
@@ -754,18 +754,17 @@ namespace {
         Real rad = sqrt(SQR(x1v)+SQR(x2v)+SQR(x3v));
         Real r_cil = sqrt(SQR(x1v) + SQR(x2v));
 
-        const Real& alpha = adm.alpha(m, k, j, i);
         const Real cm_to_km = 1.0e-5;
         const Real km_to_cm = 1/cm_to_km;
         const Real c_cgs = units::Units::speed_of_light_cgs;
         const Real s_to_km = c_cgs * cm_to_km;
         const Real km_to_s = 1/s_to_km;  
-        const Real t_cgs = alpha*t_code*km_to_s;
+        const Real t_cgs = t_code*km_to_s;
         const Real a_cgs = units::Units::rad_constant_cgs;
 
         Real band = epsilon_tol * dl;
-        Real epsilon_frac = TransitionEpsilon(band, r0/alpha, rad);
-        if (epsilon_frac > 1.0e-3) {
+        Real epsilon_frac = TransitionEpsilon(band, r0, rad);
+        if (epsilon_frac > mask_tol) {
 
           Real th = acos(Kokkos::fmin(1.0, Kokkos::fmax(-1.0, x3v/rad)));
 
@@ -777,8 +776,8 @@ namespace {
           }
 
           Real veloc = Interpolate2D(theta_tm, time_tm, vinfty_tm, nu_vel, th, t_cgs);
-          Real gamma = 1.0/sqrt(1.0 - SQR(veloc/c_cgs));
-          Real den = mdot/(4*M_PI*SQR(alpha*rad*km_to_cm)*gamma*veloc);
+          Real w = 1.0/sqrt(1.0 - SQR(veloc/c_cgs));
+          Real den = mdot/(4*M_PI*SQR(rad*km_to_cm)*w*veloc);
           Real temp = Interpolate2D(theta_tm, time_tm, temp_tm, nu_temp, th, t_cgs);
           Real pres = a_cgs*pow(temp, 4)/3.0;
 
@@ -786,7 +785,8 @@ namespace {
           const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
           const Real g_cm3_to_g_km3 = 1.0/(cm_to_km*cm_to_km*cm_to_km);
           const Real cm_s_1 = 1/c_cgs;
-          const Real K_to_1 = units::Units::k_boltzmann_cgs*SQR(cm_s_1)/(mu*units::Units::atomic_mass_unit_cgs);
+          const Real K_to_1 = units::Units::k_boltzmann_cgs*SQR(cm_s_1)/
+                                  (mu*units::Units::atomic_mass_unit_cgs);
           const Real dyne_to_g_km3 = 1/SQR(c_cgs)*g_cm3_to_g_km3;
 
           den *= g_cm3_to_g_km3;
@@ -797,56 +797,18 @@ namespace {
           Real wvy;
           Real wvz;
 
-          if (r_cil == 0) {
+          if(r_cil > 0) {
+            wvx = w*veloc * x1v / rad;
+            wvy = w*veloc * x2v / rad;
+            wvz = w*veloc * x3v / rad;
+          } else {
             wvx = 0.0;
             wvy = 0.0;
-            wvz = veloc * x3v / rad;
-            Real Gamma0 = 1.0/sqrt(1.0-SQR(wvx)-SQR(wvy)-SQR(wvz));
-            wvx *= Gamma0 / alpha;
-            wvy *= Gamma0/ alpha;
-            wvz *= Gamma0 / alpha;
-          } else {
-            wvx = veloc * (1 + delta_vel*x2v/r_cil) * x1v / rad;
-            wvy = veloc * (1 + delta_vel*x2v/r_cil) * x2v / rad;
-            wvz = veloc * (1 + delta_vel*x2v/r_cil) * x3v / rad;
-            Real Gamma0 = 1.0/sqrt(1.0-SQR(wvx)-SQR(wvy)-SQR(wvz));
-            wvx *= Gamma0 / alpha;
-            wvy *= Gamma0 / alpha;
-            wvz *= Gamma0 / alpha;
+            wvz = w*veloc * x3v / rad;
           }
 
-          // We need to extract w in the expanding cordinates instead of using Gamma_l, because we
-          // converted (wv) from Lorentz to the expanding coordinates, but not w alone:
+          Real h = 1.0 + (gamma-1.0)/gamma * pres/den;
 
-          Real g3d[NSPMETRIC] = {adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
-                                  adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
-                                  adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i)};
-
-          Real detg = adm::SpatialDet(g3d[S11], g3d[S12], g3d[S13],
-                                      g3d[S22], g3d[S23], g3d[S33]);
-          Real vol = sqrt(detg);
-
-          Real v[3] = {wvx, wvy, wvz};
-          Real v2 = Primitive::SquareVector(v, g3d);
-
-          // if (1.0 - v2 <= 0) {
-          //   std::cout << "The velocity is superluminal!" << std::endl
-          //             << "Attempting to adjust..." << std::endl;
-          //   Real fac = Kokkos::sqrt((1.0 - 1e-15)/v2);
-          //   wvx *= fac;
-          //   wvy *= fac;
-          //   wvz *= fac;
-          //   v2 = 1.0 - 1.0e-15;
-          // }
-
-          Real w = sqrt(1.0 + v2); 
-
-          // In addition we lower wv^i:
-          Real wv_x = g3d[S11]*wvx + g3d[S12]*wvy + g3d[S13]*wvz;
-          Real wv_y = g3d[S12]*wvx + g3d[S22]*wvy + g3d[S23]*wvz;
-          Real wv_z = g3d[S13]*wvx + g3d[S23]*wvy + g3d[S33]*wvz;
-
-          // Now we are in position to create the "new vector u0_eq":
           Real u0_or[5];
           Real u0_eq[5];
 
@@ -856,19 +818,23 @@ namespace {
           u0_or[3] = u0(m,IM3,k,j,i);
           u0_or[4] = u0(m,IEN,k,j,i);
 
-          Real h = 1.0 + (gamma-1.0)/gamma * pres/den;
+          u0_eq[0] = w*den;
+          u0_eq[1] = den*h*w*wvx;
+          u0_eq[2] = den*h*w*wvy;
+          u0_eq[3] = den*h*w*wvz;
+          u0_eq[4] = den*h*w*w - pres - w*den;
 
-          u0_eq[0] = vol*w*den;
-          u0_eq[1] = vol*den*h*w*wv_x;
-          u0_eq[2] = vol*den*h*w*wv_y;
-          u0_eq[3] = vol*den*h*w*wv_z;
-          u0_eq[4] = vol*(den*h*w*w - pres - w*den); 
+          u0(m,IDN,k,j,i) = u0_eq[0] + (u0_or[0] - u0_eq[0])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IM1,k,j,i) = u0_eq[1] + (u0_or[1] - u0_eq[1])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IM2,k,j,i) = u0_eq[2] + (u0_or[2] - u0_eq[2])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IM3,k,j,i) = u0_eq[3] + (u0_or[3] - u0_eq[3])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IEN,k,j,i) = u0_eq[4] + (u0_or[4] - u0_eq[4])*exp(-epsilon_frac*beta_dt/tau);
 
-          u0(m,IDN,k,j,i) += -alpha*vol*beta_dt*(u0_or[0] - u0_eq[0])/tau * epsilon_frac;
-          u0(m,IM1,k,j,i) += -alpha*vol*beta_dt*(u0_or[1] - u0_eq[1])/tau * epsilon_frac;
-          u0(m,IM2,k,j,i) += -alpha*vol*beta_dt*(u0_or[2] - u0_eq[2])/tau * epsilon_frac;
-          u0(m,IM3,k,j,i) += -alpha*vol*beta_dt*(u0_or[3] - u0_eq[3])/tau * epsilon_frac;
-          u0(m,IEN,k,j,i) += -alpha*vol*beta_dt*(u0_or[4] - u0_eq[4])/tau * epsilon_frac;
+          //u0(m,IDN,k,j,i) += -beta_dt*(u0_or[0] - u0_eq[0])/tau * epsilon_frac;
+          //u0(m,IM1,k,j,i) += -beta_dt*(u0_or[1] - u0_eq[1])/tau * epsilon_frac;
+          //u0(m,IM2,k,j,i) += -beta_dt*(u0_or[2] - u0_eq[2])/tau * epsilon_frac;
+          //u0(m,IM3,k,j,i) += -beta_dt*(u0_or[3] - u0_eq[3])/tau * epsilon_frac;
+          //u0(m,IEN,k,j,i) += -beta_dt*(u0_or[4] - u0_eq[4])/tau * epsilon_frac;
         }
       });
     }
@@ -881,7 +847,7 @@ namespace {
     }
 
     MeshBlockPack *pmbp = pm->pmb_pack; 
-    Real tau = pmbp->pmesh->dt;
+    Real tau = beta_dt/5.0;
     const Real t_code = pmbp->pmesh->time; 
     auto &indcs = pmbp->pmesh->mb_indcs;
     int is = indcs.is;
@@ -891,9 +857,7 @@ namespace {
     int je = indcs.je;
     int ke = indcs.ke;
     int nmb1 = pmbp->nmb_thispack - 1;
-    auto &size = pmbp->pmb->mb_size;
-    auto &adm = pmbp->padm->adm;
-    
+    auto &size = pmbp->pmb->mb_size; 
 
     if (pmbp->pmhd != nullptr) {
       EOS_Data &eos = pmbp->pmhd->peos->eos_data;
@@ -934,30 +898,17 @@ namespace {
         Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
         Real r_cil = sqrt(SQR(x1v) + SQR(x2v));
 
-        const Real& alpha = adm.alpha(m, k, j, i);
-
         Real band = epsilon_tol * dl;
-        Real epsilon_frac = TransitionEpsilon(band, r0/alpha, rad);
+        Real epsilon_frac = TransitionEpsilon(band, r0, rad);
         Real theta = acos(x3v/rad);
         Real theta_min = M_PI - theta_j;
 
         if ((epsilon_frac > 1.0e-3) && ((theta < theta_j) || (theta > theta_min))) {
 
-          Real g3d[NSPMETRIC] = {adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
-                                 adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
-                                 adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i)};
-
-          Real detg = adm::SpatialDet(g3d[S11], g3d[S12], g3d[S13],
-                                      g3d[S22], g3d[S23], g3d[S33]);
-          Real vol = sqrt(detg);
-
           Real den;
           Real wvx;
           Real wvy;
           Real wvz;
-          Real wv_x;
-          Real wv_y;
-          Real wv_z;
           Real pres;
           
           // Check units here, and finally at wind
@@ -966,7 +917,7 @@ namespace {
           const Real c_cgs = units::Units::speed_of_light_cgs;
           const Real s_to_km = c_cgs * cm_to_km;
           const Real km_to_s = 1/s_to_km;  
-          const Real t_cgs = alpha*t_code*km_to_s;
+          const Real t_cgs = t_code*km_to_s;
           const Real a_cgs = units::Units::rad_constant_cgs;
 
           Real x;
@@ -976,9 +927,9 @@ namespace {
             x = theta;
           }
 
-          Real Gamma = 1.0 / sqrt(1.0 - (SQR(vr) + SQR(vp*(x/theta_j))));
-          Real Gamma_r = 1.0 / sqrt(1.0 - SQR(vr));
-          Real h = Gamma_inf/Gamma_r; 
+          Real w = 1.0 / sqrt(1.0 - (SQR(vr) + SQR(vp*(x/theta_j))));
+          Real w_r = 1.0 / sqrt(1.0 - SQR(vr));
+          Real h = Gamma_inf/w_r; 
 
           // We convert from cgs, and K to [M] = g, [L]= km, [c] = 1, and [T] = 1.
           const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
@@ -987,29 +938,19 @@ namespace {
           const Real K_to_1 = units::Units::k_boltzmann_cgs*SQR(cm_s_1)/(mu*units::Units::atomic_mass_unit_cgs);
           const Real dyne_to_g_km3 = 1/SQR(c_cgs)*g_cm3_to_g_km3;
 
-          den = Lj/(4*M_PI*SQR(alpha*rad*km_to_cm)*(vr*c_cgs)*SQR(Gamma_r)*h*SQR(c_cgs));
+          den = Lj/(4*M_PI*SQR(rad*km_to_cm)*(vr*c_cgs)*SQR(w_r)*h*SQR(c_cgs));
           den *= dyne_to_g_km3;
 
           // vr and vp do not need to be converted to cgs because they are already multiples of c.
           if (r_cil == 0) {
             wvx = 0.0;
             wvy = 0.0;
-            wvz = Gamma * (vr*x3v/rad)/alpha;
+            wvz = w * vr*x3v/rad;
           } else {
-            wvx = Gamma * (vr*x1v/rad - vp*(x/theta_j)*x2v/r_cil)/alpha;
-            wvy = Gamma * (vr*x2v/rad + vp*(x/theta_j)*x1v/r_cil)/alpha;
-            wvz = Gamma * (vr*x3v/rad)/alpha;
+            wvx = w * vr*x1v/rad - vp*(x/theta_j)*x2v/r_cil;
+            wvy = w * vr*x2v/rad + vp*(x/theta_j)*x1v/r_cil;
+            wvz = w * vr*x3v/rad;
           }
-
-          // We need to extract w in the expanding cordinates instead of using Gamma_l, because we
-          // converted (wv) from Lorentz to the expanding coordinates, but not w alone.
-          Real v[3] = {wvx, wvy, wvz};
-          Real v2 = Primitive::SquareVector(v, g3d);
-          Real w = sqrt(1.0 + v2); 
-
-          wv_x = g3d[S11]*wvx + g3d[S12]*wvy + g3d[S13]*wvz;
-          wv_y = g3d[S12]*wvx + g3d[S22]*wvy + g3d[S23]*wvz;
-          wv_z = g3d[S13]*wvx + g3d[S23]*wvy + g3d[S33]*wvz;
 
           // Magnetic Field Prescription. Because [pres_avg]=[den] we do not need to convert bphi
           Real eta = 1/(1+0.5*(sigma_r+sigma_phi))*(h+0.5*(sigma_r + sigma_phi)); //express h in terms of h*
@@ -1017,7 +958,7 @@ namespace {
           Real br = sqrt(2.0*sigma_r*pres_avg);
           Real factor = -SQR(ratio)/(1 + SQR(ratio)) + ratio*atan(1/ratio);
           Real factor_inv = 1.0/factor;
-          Real bphi = Gamma_r * sqrt(pres_avg*sigma_phi*factor_inv);
+          Real bphi = w_r * sqrt(pres_avg*sigma_phi*factor_inv);
 
           // Adding the magnetic field. This will be used to compute the conserved 
           // variables contributions of the prescribed magnetic fields.
@@ -1027,31 +968,27 @@ namespace {
           if (r_cil == 0) {
             bx = 0.0;
             by = 0.0;
-            bz = (br*x3v/rad)/SQR(alpha);
+            bz = br*x3v/rad;
           } else {
             Real theta_m = ratio * theta_j;
-            bx = (br*x1v/rad - bphi*(x/theta_m)*x2v/r_cil)/SQR(alpha);
-            by = (br*x2v/rad + bphi*(x/theta_m)*x1v/r_cil)/SQR(alpha);
-            bz = (br*x3v/rad)/SQR(alpha);
+            bx = br*x1v/rad - bphi*(x/theta_m)*x2v/r_cil;
+            by = br*x2v/rad + bphi*(x/theta_m)*x1v/r_cil;
+            bz = br*x3v/rad;
           }
 
-          //Lowering the magnetic field:
-          Real b_x = g3d[S11]*bx + g3d[S12]*by + g3d[S13]*bz;
-          Real b_y = g3d[S12]*bx + g3d[S22]*by + g3d[S23]*bz;
-          Real b_z = g3d[S13]*bx + g3d[S23]*by + g3d[S33]*bz;
-          Real b2 = b_x * bx + b_y * by + b_z * bz;
+          Real b2 = SQR(bx) + SQR(by) + SQR(bz);
 
           // We will use the Lorentz values of br and bphi to compute the pressure.
           // Since the pressure is an scalar, and no further corrections are needed.
           Real xm = ratio * theta_j;
           Real p[8];
-          p[0] = (-2.0*SQR(bphi)*SQR(x))/(SQR(Gamma_r)*(SQR(xm) + SQR(x)));
-          p[1] = (-2.0*SQR(bphi)*SQR(xm)*SQR(x))/(SQR(Gamma_r)*SQR(SQR(xm) + SQR(x)));
+          p[0] = (-2.0*SQR(bphi)*SQR(x))/(SQR(w_r)*(SQR(xm) + SQR(x)));
+          p[1] = (-2.0*SQR(bphi)*SQR(xm)*SQR(x))/(SQR(w_r)*SQR(SQR(xm) + SQR(x)));
           p[2] = (bphi*br*vp*vr*xm*(-2.0*SQR(x) - (SQR(xm) + SQR(x))*log(SQR(xm)
                 /(SQR(xm) + SQR(x)))))/(theta_j*(SQR(xm) + SQR(x)));
           p[3] = (SQR(br)*SQR(vp)*SQR(x))/(2.0*SQR(theta_j));
           p[4] = -((bphi*br*vp*vr*xm*log(1 + SQR(x)/SQR(xm)))/theta_j);
-          p[5] = (den*SQR(Gamma)*h*SQR(vp)*SQR(x))/(2.0*SQR(theta_j));
+          p[5] = (den*SQR(w)*h*SQR(vp)*SQR(x))/(2.0*SQR(theta_j));
           p[6] = (SQR(br)*SQR(vp)*SQR(x))/(2.0*SQR(theta_j));
           p[7] = (-2.0*bphi*br*vp*vr*xm*log(1.0 + SQR(x)/SQR(xm)))/theta_j;
 
@@ -1069,17 +1006,23 @@ namespace {
 
           // Check ideal_grmhd.cpp for the correct routine to make the prim to cons, conversion
           Real u0_eq[5];
-          u0_eq[0] = vol*den*w;
-          u0_eq[1] = vol*(den*h*w*wv_x + b2*wv_x/w  - (bx*wv_x/w + by*wv_y/w + bz*wv_z/w)*b_x);
-          u0_eq[2] = vol*(den*h*w*wv_y + b2*wv_y/w  - (bx*wv_x/w + by*wv_y/w + bz*wv_z/w)*b_y);
-          u0_eq[3] = vol*(den*h*w*wv_z + b2*wv_z/w  - (bx*wv_x/w + by*wv_y/w + bz*wv_z/w)*b_z);
-          u0_eq[4] = vol*(den*h*w*w + b2 - pres - 0.5*(SQR(bx*wv_x/w + by*wv_y/w + bz*wv_z/w) + b2/(w*w)) - den*w);
+          u0_eq[0] = den*w;
+          u0_eq[1] = den*h*w*wvx + b2*wvx/w  - (bx*wvx/w + by*wvy/w + bz*wvz/w)*bx;
+          u0_eq[2] = den*h*w*wvy + b2*wvy/w  - (bx*wvx/w + by*wvy/w + bz*wvz/w)*by;
+          u0_eq[3] = den*h*w*wvz + b2*wvz/w  - (bx*wvx/w + by*wvy/w + bz*wvz/w)*bz;
+          u0_eq[4] = den*h*w*w + b2 - pres - 0.5*(SQR(bx*wvx/w + by*wvy/w + bz*wvz/w) + b2/(w*w)) - den*w;
 
-          u0(m,IDN,k,j,i) += -alpha*vol*beta_dt*(u0_orig[0] - u0_eq[0])/tau * epsilon_frac;
-          u0(m,IM1,k,j,i) += -alpha*vol*beta_dt*(u0_orig[1] - u0_eq[1])/tau * epsilon_frac;
-          u0(m,IM2,k,j,i) += -alpha*vol*beta_dt*(u0_orig[2] - u0_eq[2])/tau * epsilon_frac;
-          u0(m,IM3,k,j,i) += -alpha*vol*beta_dt*(u0_orig[3] - u0_eq[3])/tau * epsilon_frac;
-          u0(m,IEN,k,j,i) += -alpha*vol*beta_dt*(u0_orig[4] - u0_eq[4])/tau * epsilon_frac;
+          u0(m,IDN,k,j,i) = u0_eq[0] + (u0_orig[0] - u0_eq[0])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IM1,k,j,i) = u0_eq[1] + (u0_orig[1] - u0_eq[1])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IM2,k,j,i) = u0_eq[2] + (u0_orig[2] - u0_eq[2])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IM3,k,j,i) = u0_eq[3] + (u0_orig[3] - u0_eq[3])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IEN,k,j,i) = u0_eq[4] + (u0_orig[4] - u0_eq[4])*exp(-epsilon_frac*beta_dt/tau);
+          
+          //u0(m,IDN,k,j,i) += -beta_dt*(u0_orig[0] - u0_eq[0])/tau * epsilon_frac;
+          //u0(m,IM1,k,j,i) += -beta_dt*(u0_orig[1] - u0_eq[1])/tau * epsilon_frac;
+          //u0(m,IM2,k,j,i) += -beta_dt*(u0_orig[2] - u0_eq[2])/tau * epsilon_frac;
+          //u0(m,IM3,k,j,i) += -beta_dt*(u0_orig[3] - u0_eq[3])/tau * epsilon_frac;
+          //u0(m,IEN,k,j,i) += -beta_dt*(u0_orig[4] - u0_eq[4])/tau * epsilon_frac;
         }
       });
     }
