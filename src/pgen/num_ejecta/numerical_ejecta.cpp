@@ -47,12 +47,9 @@ namespace {
   // Central Engine Variables:
   Real Lj_eng;
   Real vr_eng;
-  Real vp_eng;
   Real Gamma_inf_eng;
   Real theta_j_eng;
-  Real sigma_r_eng;
-  Real sigma_phi_eng;
-  Real ratio_eng;
+  Real sigma_eng;
   Real r0_ejecta;
   Real epsilon_tol_ej;
   Real delay;
@@ -80,6 +77,7 @@ namespace {
   void SetCentralEngine(Mesh* pm, const Real bdt);
   void SetPulsarWind(Mesh* pm, const Real bdt);
   void SetUserSources(Mesh* pm, const Real bdt);
+  void RefinementCondition(MeshBlockPack* pmbp); 
 }
 
 
@@ -268,12 +266,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Central Engine Radius:
   Lj_eng          = pin->GetReal("problem", "Lj_eng");
   vr_eng          = pin->GetReal("problem", "vr_eng"); 
-  vp_eng          = pin->GetReal("problem", "vp_eng");
   Gamma_inf_eng   = pin->GetReal("problem", "Gamma_inf_eng");
   theta_j_eng     = pin->GetReal("problem", "theta_j_eng");
-  sigma_r_eng     = pin->GetReal("problem", "sigma_r_eng");
-  sigma_phi_eng   = pin->GetReal("problem", "sigma_phi_eng");
-  ratio_eng       = pin->GetReal("problem", "ratio_eng");
+  sigma_eng      = pin->GetReal("problem", "sigma_eng");
   r0_ejecta       = pin->GetReal("problem", "r0_ejecta");
   epsilon_tol_ej  = pin->GetReal("problem", "epsilon_tol_ej");
 
@@ -299,6 +294,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
  
   // Set an immerse bc that recreate the ejecta.
+  user_ref_func = RefinementCondition;
   user_srcs_func = &SetUserSources;
 
   if (restart) return;
@@ -829,12 +825,6 @@ namespace {
           u0(m,IM2,k,j,i) = u0_eq[2] + (u0_or[2] - u0_eq[2])*exp(-epsilon_frac*beta_dt/tau);
           u0(m,IM3,k,j,i) = u0_eq[3] + (u0_or[3] - u0_eq[3])*exp(-epsilon_frac*beta_dt/tau);
           u0(m,IEN,k,j,i) = u0_eq[4] + (u0_or[4] - u0_eq[4])*exp(-epsilon_frac*beta_dt/tau);
-
-          //u0(m,IDN,k,j,i) += -beta_dt*(u0_or[0] - u0_eq[0])/tau * epsilon_frac;
-          //u0(m,IM1,k,j,i) += -beta_dt*(u0_or[1] - u0_eq[1])/tau * epsilon_frac;
-          //u0(m,IM2,k,j,i) += -beta_dt*(u0_or[2] - u0_eq[2])/tau * epsilon_frac;
-          //u0(m,IM3,k,j,i) += -beta_dt*(u0_or[3] - u0_eq[3])/tau * epsilon_frac;
-          //u0(m,IEN,k,j,i) += -beta_dt*(u0_or[4] - u0_eq[4])/tau * epsilon_frac;
         }
       });
     }
@@ -866,14 +856,12 @@ namespace {
 
       const Real Lj = Lj_eng;
       const Real vr = vr_eng;
-      const Real vp = vp_eng;
       const Real Gamma_inf = Gamma_inf_eng;
       const Real r0 = r0_ejecta;
       const Real theta_j = theta_j_eng;
-      const Real sigma_r = sigma_r_eng;
-      const Real sigma_phi = sigma_phi_eng;
-      const Real ratio = ratio_eng;
-      const Real epsilon_tol = epsilon_tol_ej;
+      const Real sigma = sigma_eng;
+      const Real epsilon_tol = epsilon_tol_ej;  
+      const Real mask_tol = mask_tol_ej;
 
       par_for("central_engine", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -903,7 +891,7 @@ namespace {
         Real theta = acos(x3v/rad);
         Real theta_min = M_PI - theta_j;
 
-        if ((epsilon_frac > 1.0e-3) && ((theta < theta_j) || (theta > theta_min))) {
+        if ((epsilon_frac > mask_tol) && ((theta < theta_j) || (theta > theta_min))) {
 
           Real den;
           Real wvx;
@@ -917,8 +905,6 @@ namespace {
           const Real c_cgs = units::Units::speed_of_light_cgs;
           const Real s_to_km = c_cgs * cm_to_km;
           const Real km_to_s = 1/s_to_km;  
-          const Real t_cgs = t_code*km_to_s;
-          const Real a_cgs = units::Units::rad_constant_cgs;
 
           Real x;
           if (theta > theta_min){
@@ -927,19 +913,20 @@ namespace {
             x = theta;
           }
 
-          Real w = 1.0 / sqrt(1.0 - (SQR(vr) + SQR(vp*(x/theta_j))));
-          Real w_r = 1.0 / sqrt(1.0 - SQR(vr));
-          Real h = Gamma_inf/w_r; 
+          Real w = 1.0 / sqrt(1.0 - SQR(vr));
+          Real h = Gamma_inf/w;
+          Real eta = h/(1 + sigma); 
 
           // We convert from cgs, and K to [M] = g, [L]= km, [c] = 1, and [T] = 1.
-          const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
           const Real g_cm3_to_g_km3 = 1.0/(cm_to_km*cm_to_km*cm_to_km);
           const Real cm_s_1 = 1/c_cgs;
-          const Real K_to_1 = units::Units::k_boltzmann_cgs*SQR(cm_s_1)/(mu*units::Units::atomic_mass_unit_cgs);
           const Real dyne_to_g_km3 = 1/SQR(c_cgs)*g_cm3_to_g_km3;
 
-          den = Lj/(4*M_PI*SQR(rad*km_to_cm)*(vr*c_cgs)*SQR(w_r)*h*SQR(c_cgs));
-          den *= dyne_to_g_km3;
+          den = Lj/(2.0*M_PI*(1 - cos(theta_j))*SQR(rad*km_to_cm)*(vr*c_cgs)*SQR(w)*h*SQR(c_cgs));
+          pres = (gamma - 1.0)/gamma*(eta - 1.0) * den * SQR(c_cgs);
+
+          den *= g_cm3_to_g_km3;
+          pres *= dyne_to_g_km3;
 
           // vr and vp do not need to be converted to cgs because they are already multiples of c.
           if (r_cil == 0) {
@@ -947,21 +934,16 @@ namespace {
             wvy = 0.0;
             wvz = w * vr*x3v/rad;
           } else {
-            wvx = w * vr*x1v/rad - vp*(x/theta_j)*x2v/r_cil;
-            wvy = w * vr*x2v/rad + vp*(x/theta_j)*x1v/r_cil;
+            wvx = w * vr*x1v/rad;
+            wvy = w * vr*x2v/rad; 
             wvz = w * vr*x3v/rad;
           }
 
-          // Magnetic Field Prescription. Because [pres_avg]=[den] we do not need to convert bphi
-          Real eta = 1/(1+0.5*(sigma_r+sigma_phi))*(h+0.5*(sigma_r + sigma_phi)); //express h in terms of h*
-          Real pres_avg = (gamma - 1.0)/gamma * (eta - 1.0) * den;
-          Real br = sqrt(2.0*sigma_r*pres_avg);
-          Real factor = -SQR(ratio)/(1 + SQR(ratio)) + ratio*atan(1/ratio);
-          Real factor_inv = 1.0/factor;
-          Real bphi = w_r * sqrt(pres_avg*sigma_phi*factor_inv);
+          // Magnetic Field Prescription. Because den is already in our units and c=1
+          Real br = SQR(w)*den*eta*sigma;
 
-          // Adding the magnetic field. This will be used to compute the conserved 
-          // variables contributions of the prescribed magnetic fields.
+          // Adding the magnetic field. This will be used to compute the
+          // Momentum and energy cobtributions
           Real bx;
           Real by;
           Real bz;
@@ -970,9 +952,8 @@ namespace {
             by = 0.0;
             bz = br*x3v/rad;
           } else {
-            Real theta_m = ratio * theta_j;
-            bx = br*x1v/rad - bphi*(x/theta_m)*x2v/r_cil;
-            by = br*x2v/rad + bphi*(x/theta_m)*x1v/r_cil;
+            bx = br*x1v/rad;
+            by = br*x2v/rad;
             bz = br*x3v/rad;
           }
 
@@ -980,23 +961,6 @@ namespace {
 
           // We will use the Lorentz values of br and bphi to compute the pressure.
           // Since the pressure is an scalar, and no further corrections are needed.
-          Real xm = ratio * theta_j;
-          Real p[8];
-          p[0] = (-2.0*SQR(bphi)*SQR(x))/(SQR(w_r)*(SQR(xm) + SQR(x)));
-          p[1] = (-2.0*SQR(bphi)*SQR(xm)*SQR(x))/(SQR(w_r)*SQR(SQR(xm) + SQR(x)));
-          p[2] = (bphi*br*vp*vr*xm*(-2.0*SQR(x) - (SQR(xm) + SQR(x))*log(SQR(xm)
-                /(SQR(xm) + SQR(x)))))/(theta_j*(SQR(xm) + SQR(x)));
-          p[3] = (SQR(br)*SQR(vp)*SQR(x))/(2.0*SQR(theta_j));
-          p[4] = -((bphi*br*vp*vr*xm*log(1 + SQR(x)/SQR(xm)))/theta_j);
-          p[5] = (den*SQR(w)*h*SQR(vp)*SQR(x))/(2.0*SQR(theta_j));
-          p[6] = (SQR(br)*SQR(vp)*SQR(x))/(2.0*SQR(theta_j));
-          p[7] = (-2.0*bphi*br*vp*vr*xm*log(1.0 + SQR(x)/SQR(xm)))/theta_j;
-
-          pres = 0.0;
-          for(int ii=0; ii<8; ii++) {
-          pres += p[ii];
-          }
-
           Real u0_orig[5];
           u0_orig[0] = u0(m,IDN,k,j,i);
           u0_orig[1] = u0(m,IM1,k,j,i);
@@ -1016,13 +980,7 @@ namespace {
           u0(m,IM1,k,j,i) = u0_eq[1] + (u0_orig[1] - u0_eq[1])*exp(-epsilon_frac*beta_dt/tau);
           u0(m,IM2,k,j,i) = u0_eq[2] + (u0_orig[2] - u0_eq[2])*exp(-epsilon_frac*beta_dt/tau);
           u0(m,IM3,k,j,i) = u0_eq[3] + (u0_orig[3] - u0_eq[3])*exp(-epsilon_frac*beta_dt/tau);
-          u0(m,IEN,k,j,i) = u0_eq[4] + (u0_orig[4] - u0_eq[4])*exp(-epsilon_frac*beta_dt/tau);
-          
-          //u0(m,IDN,k,j,i) += -beta_dt*(u0_orig[0] - u0_eq[0])/tau * epsilon_frac;
-          //u0(m,IM1,k,j,i) += -beta_dt*(u0_orig[1] - u0_eq[1])/tau * epsilon_frac;
-          //u0(m,IM2,k,j,i) += -beta_dt*(u0_orig[2] - u0_eq[2])/tau * epsilon_frac;
-          //u0(m,IM3,k,j,i) += -beta_dt*(u0_orig[3] - u0_eq[3])/tau * epsilon_frac;
-          //u0(m,IEN,k,j,i) += -beta_dt*(u0_orig[4] - u0_eq[4])/tau * epsilon_frac;
+          u0(m,IEN,k,j,i) = u0_eq[4] + (u0_orig[4] - u0_eq[4])*exp(-epsilon_frac*beta_dt/tau);  
         }
       });
     }
@@ -1221,6 +1179,63 @@ namespace {
       return;
     }  
   }
+
+  void RefinementCondition(MeshBlockPack* pmbp) {
+
+  auto &refine_flag = pmbp->pmesh->pmr->refine_flag;
+  auto &size    = pmbp->pmb->mb_size;
+  auto &indcs   = pmbp->pmesh->mb_indcs;
+  int &is = indcs.is, nx1 = indcs.nx1;
+  int &js = indcs.js, nx2 = indcs.nx2;
+  int &ks = indcs.ks, nx3 = indcs.nx3;
+  int nmb = pmbp->nmb_thispack;
+  int mbs = pmbp->pmesh->gids_eachrank[global_variable::my_rank];
+
+  const Real r0 = 2.0*r0_ejecta;
+  const Real theta_j = theta_j_eng;
+  const Real tiny    = 1.0e-12;
+
+  const int nkji = nx3*nx2*nx1;
+  const int nji  = nx2*nx1;
+
+  par_for_outer("WedgeAMR", DevExeSpace(), 0, 0, 0, (nmb-1),
+  KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+    Real &x1min = size.d_view(m).x1min; 
+    Real &x1max = size.d_view(m).x1max;
+    Real &x2min = size.d_view(m).x2min; 
+    Real &x2max = size.d_view(m).x2max;
+    Real &x3min = size.d_view(m).x3min; 
+    Real &x3max = size.d_view(m).x3max;
+
+    int team_flag = 0;
+    Kokkos::parallel_reduce(
+      Kokkos::TeamThreadRange(tmember, nkji),
+      [=](const int idx, int &tag) {
+        int k = idx / nji;
+        int j = (idx - k*nji) / nx1;
+        int i = (idx - k*nji - j*nx1);
+
+        Real x1v = CellCenterX(i, nx1, x1min, x1max);
+        Real x2v = CellCenterX(j, nx2, x2min, x2max);
+        Real x3v = CellCenterX(k, nx3, x3min, x3max);
+
+        Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+        // near the origin theta is ill-defined; treat as "in wedge" so the
+        // axis doesn't spuriously fail the test
+        Real theta = (rad > tiny) ? acos(x3v/rad) : 0.0;
+
+        int in_jet = (rad < r0) &&
+                       ((theta < theta_j) || (theta > (M_PI - theta_j)));
+        tag = (in_jet > tag) ? in_jet : tag;
+      },
+      Kokkos::Max<int>(team_flag));
+
+    if (team_flag > 0) {
+      refine_flag.d_view(m + mbs) = 1;
+    }
+  });
+
+  refine_flag.template modify<DevExeSpace>();
+  refine_flag.template sync<HostMemSpace>();
+  }
 }
-
-
