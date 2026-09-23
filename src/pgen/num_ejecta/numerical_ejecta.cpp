@@ -31,18 +31,24 @@
 
 
 namespace {
+
+  // Injection:
+  Real t_ce_start;
+  Real t_eng;
+  Real t_wind;
+  Real t_start_num_ej;  
+  Real t_num;
+  bool set_eng;
+  bool set_wind;
+  Real mask_tol_ej;
+  Real epsilon_tol_ej;
+  Real r0_ejecta;
+
   // Expansion:
   Real h0;
-  Real mask_tol_ej;
-  Real delta_mdot_ej;
   bool is_expanding;
   Real epsilon_h0;
   Real t_exp_max;
-  int kNTheta_ej;
-  int kNTime_ej;
-  Real t_mdot_ej;
-  Real t_vel_ej;
-  Real t_temp_ej;
 
   // Central Engine Variables:
   Real Lj_eng;
@@ -50,16 +56,8 @@ namespace {
   Real Gamma_inf_eng;
   Real theta_j_eng;
   Real sigma_eng;
-  Real r0_ejecta;
-  Real epsilon_tol_ej;
-  Real delay;
-  Real t_eng;
-  bool set_eng;
 
   // Pulsar Wind:
-  Real t_waiting; 
-  Real t_wind;    
-  bool set_wind;
   Real B_star_wind;  
   Real R_star_wind; 
   Real P_star_wind;  
@@ -68,17 +66,13 @@ namespace {
   Real u_w_wind;
 
   //Numerical Ejecta:
-  Real t_num;
   std::vector<Block> numerical_data;
-  Real t_start_num_ej;  // sim time (code units) at which injection actually began;
-                         // < 0 means "not yet captured"
-  ParameterInput* pin_ej;  // stashed so SetUserSources (which only gets a Mesh*)
-                            // can persist t_start_num_ej into pin once captured
-
-  //AMR:
-  int level_min;   // floor (physical level, relative to root) below which
-                    // RefinementCondition will not derefine post-injection
-  int injection_start;
+  int kNTheta_ej;
+  int kNTime_ej;
+  Real nu_mdot_ej;
+  Real nu_vel_ej;
+  Real nu_temp_ej;
+  Real delta_mdot_ej;
 
   //Functors:
   void SetADMVariablesToFLRW(MeshBlockPack *pmbp);
@@ -243,29 +237,27 @@ Real TransitionEpsilon(const Real &epsilon_tol, const Real &r0, const Real &rad)
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
 
-  //nu_mdot_ej = pin->GetReal("problem", "nu_mdot");
-  //nu_vel_ej = pin->GetReal("problem", "nu_vel");
-  //nu_temp_ej = pin->GetReal("problem", "nu_temp");
-  nu_mdot_ej = pin->GetReal("problem", "nu_mdot_ej");
-  nu_vel_ej  = pin->GetReal("problem", "nu_vel_ej");
-  nu_temp_ej = pin->GetReal("problem", "nu_temp_ej");
+  //Injection:
+  mask_tol_ej    = pin->GetReal("problem", "mask_tol_ej");
+  t_start_num_ej = pin->GetOrAddReal("problem", "t_start_num_ej", 0.0);
+  epsilon_tol_ej = pin->GetReal("problem", "epsilon_tol_ej");
+  t_ce_start     = pin->GetReal("problem", "t_ce_start");
+  t_eng          = pin->GetReal("problem", "t_eng");
+  t_num          = pin->GetReal("problem", "t_num");
+  set_wind       = pin->GetOrAddBoolean("problem", "set_wind", false);
+  set_eng        = pin->GetOrAddBoolean("problem", "set_eng", false);
+  t_wind         = pin->GetReal("problem", "t_wind");
+  r0_ejecta      = pin->GetReal("problem", "r0_ejecta");
 
-  delta_mdot_ej = pin->GetReal("problem", "delta_mdot_ej");
-  mask_tol_ej  = pin->GetReal("problem", "mask_tol_ej");
+  if (set_eng && set_wind) {
+    std::cout << "WARNING: Both engines are on. Please only turn on one choice" << std::endl;
+  }
 
+  //Expansion
   is_expanding = pin->GetOrAddBoolean("problem", "is_expanding", true);
-
-  t_exp_max = pin->GetReal("problem", "t_exp_max");
-  delay     = pin->GetReal("problem", "delay");
-  t_eng     = pin->GetReal("problem", "t_eng");
-  set_eng   = pin->GetOrAddBoolean("problem", "set_eng", true); 
-  
-  // Maximum velocity of the expansion
+  t_exp_max  = pin->GetReal("problem", "t_exp_max");
   Real vmax = pin->GetReal("problem", "vmax");
-
-  // Maximum radius of the expansion
   Real rmax = pin->GetReal("problem", "rmax");
-
   epsilon_h0 = pin->GetReal("problem", "epsilon_h0");
 
   if (is_expanding) {  
@@ -282,14 +274,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   vr_eng          = pin->GetReal("problem", "vr_eng"); 
   Gamma_inf_eng   = pin->GetReal("problem", "Gamma_inf_eng");
   theta_j_eng     = pin->GetReal("problem", "theta_j_eng");
-  sigma_eng      = pin->GetReal("problem", "sigma_eng");
-  r0_ejecta       = pin->GetReal("problem", "r0_ejecta");
-  epsilon_tol_ej  = pin->GetReal("problem", "epsilon_tol_ej");
+  sigma_eng       = pin->GetReal("problem", "sigma_eng");
+
 
   // Pulsar Wind:
-  t_waiting    = pin->GetReal("problem", "t_waiting");
-  t_wind       = pin->GetReal("problem", "t_wind");
-  set_wind     = pin->GetOrAddBoolean("problem", "set_wind", true);
   B_star_wind  = pin->GetReal("problem", "B_star_wind");
   R_star_wind  = pin->GetReal("problem", "R_star_wind");
   P_star_wind  = pin->GetReal("problem", "P_star_wind");
@@ -297,9 +285,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   sigma_w_wind = pin->GetReal("problem", "sigma_w_wind");
   u_w_wind     = pin->GetReal("problem", "u_w_wind");
 
+  //Ejecta:
+  delta_mdot_ej = pin->GetReal("problem", "delta_mdot_ej");
+  nu_mdot_ej = pin->GetReal("problem", "nu_mdot_ej");
+  nu_vel_ej  = pin->GetReal("problem", "nu_vel_ej");
+  nu_temp_ej = pin->GetReal("problem", "nu_temp_ej");
+
   {
     // Reading:
-    t_num = pin->GetReal("problem", "t_num");
+
     std::string filename = pin->GetString("problem", "file_path");
     NumericalEjectaData model(filename);
     numerical_data = model.ComputeBlocks();
@@ -307,23 +301,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     kNTime_ej = model.tsize();
   }
 
-  // AMR floor: once injection ends, RefinementCondition derefines back down,
-  // but never below this physical level.
-  level_min = pin->GetOrAddInteger("problem", "level_min", 6);
-
-  // Don't start numerical-ejecta injection until AMR has had time to reach
-  // its target depth in the injection region (empirically ~185 cycles for
-  // num_levels=9 on this mesh; default here leaves some margin).
-  injection_start = pin->GetOrAddInteger("problem", "injection_start", 20);
-
-  // Captured the first time injection turns on (ncycle >= injection_start),
-  // so the interpolation table is evaluated from its own t=0 instead of
-  // from the absolute simulation time. Persisted via pin (GetOrAddReal here,
-  // SetReal at capture time in SetUserSources) so a restart recovers the
-  // original value instead of re-capturing at the restart's later time,
-  // which would otherwise shift the injected profile.
-  pin_ej = pin;
-  t_start_num_ej = pin->GetOrAddReal("problem", "t_start_num_ej", -1.0);
+  // AMR Warning: 
+  if (global_variable::my_rank == 0 && !pin->DoesBlockExist("refined_region1")) {
+    std::cout << "WARNING: "
+              << "No <refined_region1> block found: mesh starts at root level and "
+              << "RefinementCondition only derefines" << std::endl;
+  }
 
   // Set an immerse bc that recreate the ejecta.
   user_ref_func = RefinementCondition;
@@ -672,9 +655,9 @@ namespace {
       const std::vector<Block> h_ejecta = numerical_data;
       const int kNTheta = kNTheta_ej;
       const int kNTime  = kNTime_ej;
-      const Real nu_mdot = t_mdot_ej;
-      const Real nu_vel = t_vel_ej;
-      const Real nu_temp = t_temp_ej;
+      const Real nu_mdot = nu_mdot_ej;
+      const Real nu_vel = nu_vel_ej;
+      const Real nu_temp = nu_temp_ej;
       const Real delta_mdot = delta_mdot_ej;
       const Real mask_tol = mask_tol_ej;
       const Real t_start = t_start_num_ej;
@@ -757,16 +740,16 @@ namespace {
           Real th = acos(Kokkos::fmin(1.0, Kokkos::fmax(-1.0, x3v/rad)));
 
           // Find rhp. veloc, and pres in cgs units
-          Real mdot = Interpolate2D(theta_tm, time_tm, mdot_tm, t_mdot, th, t_cgs);
+          Real mdot = Interpolate2D(theta_tm, time_tm, mdot_tm, nu_mdot, th, t_cgs);
 
           if (r_cil > 0.0 && delta_mdot > 0.0) {
             mdot *= (1.0 + delta_mdot*x2v/r_cil);
           }
 
-          Real veloc = Interpolate2D(theta_tm, time_tm, vinfty_tm, t_vel, th, t_cgs);
+          Real veloc = Interpolate2D(theta_tm, time_tm, vinfty_tm, nu_vel, th, t_cgs);
           Real w = 1.0/sqrt(1.0 - SQR(veloc/c_cgs));
           Real den = mdot/(4*M_PI*SQR(rad*km_to_cm)*w*veloc);
-          Real temp = Interpolate2D(theta_tm, time_tm, temp_tm, t_temp, th, t_cgs);
+          Real temp = Interpolate2D(theta_tm, time_tm, temp_tm, nu_temp, th, t_cgs);
           Real pres = a_cgs*pow(temp, 4)/3.0;
 
           // We convert from cgs, and K to [M] = g, [L]= km, [c] = 1, and [T] = 1.
@@ -1148,111 +1131,46 @@ namespace {
 
   void SetUserSources(Mesh* pm, const Real bdt) {
     const Real t = pm->time;
-    if (t > 0.0 && t <= t_num) {
-      if (pm->ncycle >= injection_start) {
-        if (t_start_num_ej < 0.0) {
-          t_start_num_ej = t;
-          pin_ej->SetReal("problem", "t_start_num_ej", t_start_num_ej);
-        }
-        SetNumericalEjecta(pm, bdt);
-      }
-    } else if (t > t_num && t <= (t_num + delay)) {
-      return;
-    } else if (t > (t_num + delay) && t <= (t_num + delay + t_eng)) {
-      SetCentralEngine(pm, bdt);
-    } else if (t > (t_num + delay + t_eng) && t <= (t_num + delay + t_eng + t_waiting)) {
-      return;
-    } else if (t > (t_num + delay + t_eng + t_waiting) && t <= (t_num + delay + t_eng + t_waiting + t_wind)) {
-      SetPulsarWind(pm, bdt);
-    } else {
-      return;
-    }  
-  }
-
-
-  void RefinementCondition(MeshBlockPack* pmbp) {
-
-    auto &refine_flag = pmbp->pmesh->pmr->refine_flag;
-    auto &size  = pmbp->pmb->mb_size;
-    auto &indcs = pmbp->pmesh->mb_indcs;
-    int nx1 = indcs.nx1;
-    int nx2 = indcs.nx2;
-    int nx3 = indcs.nx3;
-    int nmb = pmbp->nmb_thispack;
-    int mbs = pmbp->pmesh->gids_eachrank[global_variable::my_rank];
-
-    const Real r0 = 10.0*r0_ejecta;
-    const Real theta_j = theta_j_eng;
-    const Real tiny    = 1.0e-12;
-    Real t_inj = t_num;
+    Real t_ce_end = t_ce_start;
 
     if (set_eng) {
-      t_inj += delay + t_eng;  
+      t_ce_end += t_eng;
+    } else if (set_wind) {
+      t_ce_end += t_wind;
+    }
+    
+    if (t >= t_start_num_ej && t < t_num) {
+      SetNumericalEjecta(pm, bdt);
     }
 
-    if (set_wind) {
-      if (set_eng) {
-        t_inj += t_waiting + t_wind;
+    if (t >= t_ce_start && t < t_ce_end) {
+      if(set_eng) {
+        SetCentralEngine(pm, bdt);
+      } else if (set_wind) {
+        SetPulsarWind(pm, bdt);
       } else {
-        t_inj += delay + t_eng + t_waiting + t_wind;
+        return;
       }
     }
 
-    bool injection_phase = pmbp->pmesh->time < t_inj;
+    return;
+  }
 
-    // Current level of each MeshBlock, and the logical level of the root
-    // grid, needed to gate derefinement at level_min (physical, i.e.
-    // relative to root) once injection ends.
+  void RefinementCondition(MeshBlockPack* pmbp) {
+    Real t = pmbp->pmesh->time;
+
+    if (t < t_num) return;
+
+    auto &refine_flag = pmbp->pmesh->pmr->refine_flag;
     auto &mblev = pmbp->pmb->mb_lev;
-    const int root_level = pmbp->pmesh->root_level;
-    const int floor_level = root_level + level_min;
+    int nmb = pmbp->nmb_thispack;
+    int mbs = pmbp->pmesh->gids_eachrank[global_variable::my_rank];
+    const int floor_level = pmbp->pmesh->root_level;
 
-    const int nkji = nx3*nx2*nx1;
-    const int nji  = nx2*nx1;
-
-    par_for_outer("PhasedAMR", DevExeSpace(), 0, 0, 0, (nmb-1),
-    KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
-      Real &x1min = size.d_view(m).x1min; 
-      Real &x1max = size.d_view(m).x1max;
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-
-      if(injection_phase) {
-        // Check for sphere
-        int sphere_flag = 0;  
-        Kokkos::parallel_reduce(
-          Kokkos::TeamThreadRange(tmember, nkji),
-          [=](const int idx, int &tag) {
-            int k = idx / nji;
-            int j = (idx - k*nji) / nx1;
-            int i = (idx - k*nji - j*nx1);
-            Real x1v = CellCenterX(i, nx1, x1min, x1max);
-            Real x2v = CellCenterX(j, nx2, x2min, x2max);
-            Real x3v = CellCenterX(k, nx3, x3min, x3max);
-            Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
-
-            //Sphere Criteria. If one cel is inside the sphere the whole meshblock should be refined.
-            int tag_cell = (rad < r0);
-            tag = (tag_cell > tag) ? tag_cell : tag;
-          }, Kokkos::Max<int>(sphere_flag)
-        );
-
-        if (sphere_flag > 0) { 
-          refine_flag.d_view(m + mbs) = 1; 
-        }
-
-      } else {
-
-        // Injection is over: relax back down, one level at a time, but
-        // never below floor_level = root_level + level_min. No spatial
-        // (sphere) restriction here -- every block above the floor is a
-        // derefine candidate; AthenaK still requires all 8 siblings to
-        // agree before an actual derefinement happens.
-        if (mblev.d_view(m) > floor_level) {
-          refine_flag.d_view(m + mbs) = -1;
-        }
+    par_for("DerefineToFloor", DevExeSpace(), 0, (nmb-1),
+    KOKKOS_LAMBDA(const int m) {
+      if (mblev.d_view(m) > floor_level) {
+        refine_flag.d_view(m + mbs) = -1;
       }
     });
 
