@@ -40,9 +40,9 @@ namespace {
   Real t_exp_max;
   int kNTheta_ej;
   int kNTime_ej;
-  Real nu_mdot_ej;
-  Real nu_vel_ej;
-  Real nu_temp_ej;
+  Real t_mdot_ej;
+  Real t_vel_ej;
+  Real t_temp_ej;
 
   // Central Engine Variables:
   Real Lj_eng;
@@ -70,6 +70,15 @@ namespace {
   //Numerical Ejecta:
   Real t_num;
   std::vector<Block> numerical_data;
+  Real t_start_num_ej;  // sim time (code units) at which injection actually began;
+                         // < 0 means "not yet captured"
+  ParameterInput* pin_ej;  // stashed so SetUserSources (which only gets a Mesh*)
+                            // can persist t_start_num_ej into pin once captured
+
+  //AMR:
+  int level_min;   // floor (physical level, relative to root) below which
+                    // RefinementCondition will not derefine post-injection
+  int injection_start;
 
   //Functors:
   void SetADMVariablesToFLRW(MeshBlockPack *pmbp);
@@ -185,6 +194,7 @@ Real Interpolate2D(const DualArray1D<Real> &theta, const DualArray2D<Real> &time
     var_i = Interpolate1D(var_ij, var_ij1, tm_j, tm_j1, t);
   } else {
     Real var_ij1 = var_ej.d_view(ith,jt+1);
+    //var_i = var_ij1 * Kokkos::exp(-(t-jtmax)/t_relax);
     var_i = var_ij1 * Kokkos::pow(t/jtmax, index);
   }
 
@@ -202,6 +212,7 @@ Real Interpolate2D(const DualArray1D<Real> &theta, const DualArray2D<Real> &time
     var_i1 = Interpolate1D(var_ik, var_ik1, tm_k, tm_k1, t);
   } else {
     Real var_ik1 = var_ej.d_view(ith+1,kt+1);
+    //var_i1 = var_ik1 *  Kokkos::exp(-(t-ktmax)/t_relax);
     var_i1 = var_ik1 * Kokkos::pow(t/ktmax, index);
   }
 
@@ -232,9 +243,12 @@ Real TransitionEpsilon(const Real &epsilon_tol, const Real &r0, const Real &rad)
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
 
-  nu_mdot_ej = pin->GetReal("problem", "nu_mdot");
-  nu_vel_ej = pin->GetReal("problem", "nu_vel");
-  nu_temp_ej = pin->GetReal("problem", "nu_temp");
+  //nu_mdot_ej = pin->GetReal("problem", "nu_mdot");
+  //nu_vel_ej = pin->GetReal("problem", "nu_vel");
+  //nu_temp_ej = pin->GetReal("problem", "nu_temp");
+  nu_mdot_ej = pin->GetReal("problem", "nu_mdot_ej");
+  nu_vel_ej  = pin->GetReal("problem", "nu_vel_ej");
+  nu_temp_ej = pin->GetReal("problem", "nu_temp_ej");
 
   delta_mdot_ej = pin->GetReal("problem", "delta_mdot_ej");
   mask_tol_ej  = pin->GetReal("problem", "mask_tol_ej");
@@ -292,7 +306,25 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     kNTheta_ej = model.thsize();
     kNTime_ej = model.tsize();
   }
- 
+
+  // AMR floor: once injection ends, RefinementCondition derefines back down,
+  // but never below this physical level.
+  level_min = pin->GetOrAddInteger("problem", "level_min", 6);
+
+  // Don't start numerical-ejecta injection until AMR has had time to reach
+  // its target depth in the injection region (empirically ~185 cycles for
+  // num_levels=9 on this mesh; default here leaves some margin).
+  injection_start = pin->GetOrAddInteger("problem", "injection_start", 20);
+
+  // Captured the first time injection turns on (ncycle >= injection_start),
+  // so the interpolation table is evaluated from its own t=0 instead of
+  // from the absolute simulation time. Persisted via pin (GetOrAddReal here,
+  // SetReal at capture time in SetUserSources) so a restart recovers the
+  // original value instead of re-capturing at the restart's later time,
+  // which would otherwise shift the injected profile.
+  pin_ej = pin;
+  t_start_num_ej = pin->GetOrAddReal("problem", "t_start_num_ej", -1.0);
+
   // Set an immerse bc that recreate the ejecta.
   user_ref_func = RefinementCondition;
   user_srcs_func = &SetUserSources;
@@ -407,10 +439,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real dx3 = size.d_view(m).dx3;
       Real dl = Kokkos::min(dx1, Kokkos::min(dx2, dx3));
 
-      Real rad_l = sqrt(SQR(x1l) + SQR(x2l) + SQR(x3l));
       Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
-      Real rad_r = sqrt(SQR(x1r) + SQR(x2r) + SQR(x3r));
-      Real r_cil = sqrt(SQR(x1v) + SQR(x2v));
 
       Real den;
       Real wvx;
@@ -434,61 +463,23 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
                               (mu*units::Units::atomic_mass_unit_cgs);
       const Real dyne_to_g_km3 = 1/SQR(c_cgs)*g_cm3_to_g_km3;
 
-      Real band = epsilon_tol * dl;
-      Real epsilon_frac = TransitionEpsilon(band, r0, rad);
-      if (epsilon_frac > mask_tol) {
-        
-        Real th = acos(Kokkos::fmin(1.0, Kokkos::fmax(-1.0, x3v/rad)));
-      
-        // We extract the density, veloc and pressure in cgs units.
-        Real mdot = Interpolate2D(theta_ej, time_ej, mdot_ej, nu_mdot, th, 0.0);
-
-        if (r_cil > 0.0 && delta_mdot > 0.0) {
-          mdot *= (1.0 + delta_mdot*x2v/r_cil);
-        }
-
-        Real veloc = Interpolate2D(theta_ej, time_ej, vinfty_ej, nu_vel, th, 0.0);
-        w = 1.0/sqrt(1.0 - SQR(veloc/c_cgs));
-        den = mdot/(4*M_PI*SQR(rad*km_to_cm)*w*veloc);
-        Real temp = Interpolate2D(theta_ej, time_ej, temp_ej, nu_temp, th, 0.0);
-        pres = a_cgs*pow(temp, 4)/3.0;
-
-        den *= g_cm3_to_g_km3;
-        veloc *= cm_s_1;
-        pres *= dyne_to_g_km3;
-
-        if (r_cil > 0.0) {
-          wvx = veloc * x1v / rad;
-          wvy = veloc * x2v / rad;
-          wvz = veloc * x3v / rad;
-          wvx *= w;
-          wvy *= w;
-          wvz *= w;
-        } else {
-          wvx = 0.0;
-          wvy = 0.0;
-          wvz = veloc * x3v / rad;
-          wvz *= w;
-        }
-
-      } else {
-        if (power_law) {
-          Real log_k1  = log(d_ism) + n_ism*log(r0);
-          Real log_rho = log_k1 - n_ism*log(rad);
-          den = exp(log_rho);
-        } else if (exponential) {
-          Real log_rho = log(d_ism) - (rad-r0)/tau_ism;
-          den = exp(log_rho);
-        } else if (constant) {
-          den = d_ism;
-        }          
-        wvx = 0.0;
-        wvy = 0.0;
-        wvz = 0.0;
-        Real temp = temp_ism; 
-        pres = a_cgs*pow(temp, 4)/3.0;
-        pres *= dyne_to_g_km3;
-      } 
+      if (power_law) {
+        Real log_k1  = log(d_ism) + n_ism*log(r0);
+        Real log_rho = log_k1 - n_ism*log(rad);
+        den = exp(log_rho);
+      } else if (exponential) {
+        Real log_rho = log(d_ism) - (rad-r0)/tau_ism;
+        den = exp(log_rho);
+      } else if (constant) {
+        den = d_ism;
+      }          
+      wvx = 0.0;
+      wvy = 0.0;
+      wvz = 0.0;
+      Real temp = temp_ism; 
+      pres = a_cgs*pow(temp, 4)/3.0;
+      pres *= dyne_to_g_km3;
+      // } 
 
       w0_(m,IDN,k,j,i) = den;
       w0_(m,IVX,k,j,i) = wvx;
@@ -659,7 +650,7 @@ namespace {
     MeshBlockPack *pmbp = pm->pmb_pack;
     const Real t_code = pmbp->pmesh->time;
     //Real tau = pmbp->pmesh->dt;
-    Real tau = beta_dt/5.0;
+    Real tau = beta_dt;
 
     auto &indcs = pmbp->pmesh->mb_indcs;
     int is = indcs.is;
@@ -681,11 +672,12 @@ namespace {
       const std::vector<Block> h_ejecta = numerical_data;
       const int kNTheta = kNTheta_ej;
       const int kNTime  = kNTime_ej;
-      const Real nu_mdot = nu_mdot_ej;
-      const Real nu_vel = nu_vel_ej;
-      const Real nu_temp = nu_temp_ej;
+      const Real nu_mdot = t_mdot_ej;
+      const Real nu_vel = t_vel_ej;
+      const Real nu_temp = t_temp_ej;
       const Real delta_mdot = delta_mdot_ej;
       const Real mask_tol = mask_tol_ej;
+      const Real t_start = t_start_num_ej;
 
       DualArray1D<Real> theta_tm("theta_arr", kNTheta);
       DualArray2D<Real> time_tm("time_arr", kNTheta, kNTime);
@@ -755,7 +747,7 @@ namespace {
         const Real c_cgs = units::Units::speed_of_light_cgs;
         const Real s_to_km = c_cgs * cm_to_km;
         const Real km_to_s = 1/s_to_km;  
-        const Real t_cgs = t_code*km_to_s;
+        const Real t_cgs = (t_code - t_start)*km_to_s;
         const Real a_cgs = units::Units::rad_constant_cgs;
 
         Real band = epsilon_tol * dl;
@@ -765,24 +757,21 @@ namespace {
           Real th = acos(Kokkos::fmin(1.0, Kokkos::fmax(-1.0, x3v/rad)));
 
           // Find rhp. veloc, and pres in cgs units
-          Real mdot = Interpolate2D(theta_tm, time_tm, mdot_tm, nu_mdot, th, t_cgs);
+          Real mdot = Interpolate2D(theta_tm, time_tm, mdot_tm, t_mdot, th, t_cgs);
 
           if (r_cil > 0.0 && delta_mdot > 0.0) {
             mdot *= (1.0 + delta_mdot*x2v/r_cil);
           }
 
-          Real veloc = Interpolate2D(theta_tm, time_tm, vinfty_tm, nu_vel, th, t_cgs);
+          Real veloc = Interpolate2D(theta_tm, time_tm, vinfty_tm, t_vel, th, t_cgs);
           Real w = 1.0/sqrt(1.0 - SQR(veloc/c_cgs));
           Real den = mdot/(4*M_PI*SQR(rad*km_to_cm)*w*veloc);
-          Real temp = Interpolate2D(theta_tm, time_tm, temp_tm, nu_temp, th, t_cgs);
+          Real temp = Interpolate2D(theta_tm, time_tm, temp_tm, t_temp, th, t_cgs);
           Real pres = a_cgs*pow(temp, 4)/3.0;
 
           // We convert from cgs, and K to [M] = g, [L]= km, [c] = 1, and [T] = 1.
-          const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
           const Real g_cm3_to_g_km3 = 1.0/(cm_to_km*cm_to_km*cm_to_km);
           const Real cm_s_1 = 1/c_cgs;
-          const Real K_to_1 = units::Units::k_boltzmann_cgs*SQR(cm_s_1)/
-                                  (mu*units::Units::atomic_mass_unit_cgs);
           const Real dyne_to_g_km3 = 1/SQR(c_cgs)*g_cm3_to_g_km3;
 
           den *= g_cm3_to_g_km3;
@@ -803,7 +792,7 @@ namespace {
             wvz = w*veloc * x3v / rad;
           }
 
-          Real h = 1.0 + (gamma-1.0)/gamma * pres/den;
+          Real h = 1.0 + gamma/(gamma-1.0) * pres/den;
 
           Real u0_or[5];
           Real u0_eq[5];
@@ -837,7 +826,7 @@ namespace {
     }
 
     MeshBlockPack *pmbp = pm->pmb_pack; 
-    Real tau = beta_dt/5.0;
+    Real tau = beta_dt;
     const Real t_code = pmbp->pmesh->time; 
     auto &indcs = pmbp->pmesh->mb_indcs;
     int is = indcs.is;
@@ -891,7 +880,7 @@ namespace {
         Real theta = acos(x3v/rad);
         Real theta_min = M_PI - theta_j;
 
-        if ((epsilon_frac > mask_tol) && ((theta < theta_j) || (theta > theta_min))) {
+        if ((rad > 0) && (epsilon_frac > mask_tol) && ((theta < theta_j) || (theta > theta_min))) {
 
           Real den;
           Real wvx;
@@ -905,13 +894,6 @@ namespace {
           const Real c_cgs = units::Units::speed_of_light_cgs;
           const Real s_to_km = c_cgs * cm_to_km;
           const Real km_to_s = 1/s_to_km;  
-
-          Real x;
-          if (theta > theta_min){
-            x = M_PI - theta;
-          } else {
-            x = theta;
-          }
 
           Real w = 1.0 / sqrt(1.0 - SQR(vr));
           Real h = Gamma_inf/w;
@@ -958,6 +940,7 @@ namespace {
           }
 
           Real b2 = SQR(bx) + SQR(by) + SQR(bz);
+          h = 1.0 + gamma/(gamma-1.0) * pres/den + b2/(w*w)/den;
 
           // We will use the Lorentz values of br and bphi to compute the pressure.
           // Since the pressure is an scalar, and no further corrections are needed.
@@ -1166,7 +1149,13 @@ namespace {
   void SetUserSources(Mesh* pm, const Real bdt) {
     const Real t = pm->time;
     if (t > 0.0 && t <= t_num) {
-      SetNumericalEjecta(pm, bdt);
+      if (pm->ncycle >= injection_start) {
+        if (t_start_num_ej < 0.0) {
+          t_start_num_ej = t;
+          pin_ej->SetReal("problem", "t_start_num_ej", t_start_num_ej);
+        }
+        SetNumericalEjecta(pm, bdt);
+      }
     } else if (t > t_num && t <= (t_num + delay)) {
       return;
     } else if (t > (t_num + delay) && t <= (t_num + delay + t_eng)) {
@@ -1180,62 +1169,94 @@ namespace {
     }  
   }
 
+
   void RefinementCondition(MeshBlockPack* pmbp) {
 
-  auto &refine_flag = pmbp->pmesh->pmr->refine_flag;
-  auto &size    = pmbp->pmb->mb_size;
-  auto &indcs   = pmbp->pmesh->mb_indcs;
-  int &is = indcs.is, nx1 = indcs.nx1;
-  int &js = indcs.js, nx2 = indcs.nx2;
-  int &ks = indcs.ks, nx3 = indcs.nx3;
-  int nmb = pmbp->nmb_thispack;
-  int mbs = pmbp->pmesh->gids_eachrank[global_variable::my_rank];
+    auto &refine_flag = pmbp->pmesh->pmr->refine_flag;
+    auto &size  = pmbp->pmb->mb_size;
+    auto &indcs = pmbp->pmesh->mb_indcs;
+    int nx1 = indcs.nx1;
+    int nx2 = indcs.nx2;
+    int nx3 = indcs.nx3;
+    int nmb = pmbp->nmb_thispack;
+    int mbs = pmbp->pmesh->gids_eachrank[global_variable::my_rank];
 
-  const Real r0 = 2.0*r0_ejecta;
-  const Real theta_j = theta_j_eng;
-  const Real tiny    = 1.0e-12;
+    const Real r0 = 10.0*r0_ejecta;
+    const Real theta_j = theta_j_eng;
+    const Real tiny    = 1.0e-12;
+    Real t_inj = t_num;
 
-  const int nkji = nx3*nx2*nx1;
-  const int nji  = nx2*nx1;
-
-  par_for_outer("WedgeAMR", DevExeSpace(), 0, 0, 0, (nmb-1),
-  KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
-    Real &x1min = size.d_view(m).x1min; 
-    Real &x1max = size.d_view(m).x1max;
-    Real &x2min = size.d_view(m).x2min; 
-    Real &x2max = size.d_view(m).x2max;
-    Real &x3min = size.d_view(m).x3min; 
-    Real &x3max = size.d_view(m).x3max;
-
-    int team_flag = 0;
-    Kokkos::parallel_reduce(
-      Kokkos::TeamThreadRange(tmember, nkji),
-      [=](const int idx, int &tag) {
-        int k = idx / nji;
-        int j = (idx - k*nji) / nx1;
-        int i = (idx - k*nji - j*nx1);
-
-        Real x1v = CellCenterX(i, nx1, x1min, x1max);
-        Real x2v = CellCenterX(j, nx2, x2min, x2max);
-        Real x3v = CellCenterX(k, nx3, x3min, x3max);
-
-        Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
-        // near the origin theta is ill-defined; treat as "in wedge" so the
-        // axis doesn't spuriously fail the test
-        Real theta = (rad > tiny) ? acos(x3v/rad) : 0.0;
-
-        int in_jet = (rad < r0) &&
-                       ((theta < theta_j) || (theta > (M_PI - theta_j)));
-        tag = (in_jet > tag) ? in_jet : tag;
-      },
-      Kokkos::Max<int>(team_flag));
-
-    if (team_flag > 0) {
-      refine_flag.d_view(m + mbs) = 1;
+    if (set_eng) {
+      t_inj += delay + t_eng;  
     }
-  });
 
-  refine_flag.template modify<DevExeSpace>();
-  refine_flag.template sync<HostMemSpace>();
+    if (set_wind) {
+      if (set_eng) {
+        t_inj += t_waiting + t_wind;
+      } else {
+        t_inj += delay + t_eng + t_waiting + t_wind;
+      }
+    }
+
+    bool injection_phase = pmbp->pmesh->time < t_inj;
+
+    // Current level of each MeshBlock, and the logical level of the root
+    // grid, needed to gate derefinement at level_min (physical, i.e.
+    // relative to root) once injection ends.
+    auto &mblev = pmbp->pmb->mb_lev;
+    const int root_level = pmbp->pmesh->root_level;
+    const int floor_level = root_level + level_min;
+
+    const int nkji = nx3*nx2*nx1;
+    const int nji  = nx2*nx1;
+
+    par_for_outer("PhasedAMR", DevExeSpace(), 0, 0, 0, (nmb-1),
+    KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+      Real &x1min = size.d_view(m).x1min; 
+      Real &x1max = size.d_view(m).x1max;
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+
+      if(injection_phase) {
+        // Check for sphere
+        int sphere_flag = 0;  
+        Kokkos::parallel_reduce(
+          Kokkos::TeamThreadRange(tmember, nkji),
+          [=](const int idx, int &tag) {
+            int k = idx / nji;
+            int j = (idx - k*nji) / nx1;
+            int i = (idx - k*nji - j*nx1);
+            Real x1v = CellCenterX(i, nx1, x1min, x1max);
+            Real x2v = CellCenterX(j, nx2, x2min, x2max);
+            Real x3v = CellCenterX(k, nx3, x3min, x3max);
+            Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+
+            //Sphere Criteria. If one cel is inside the sphere the whole meshblock should be refined.
+            int tag_cell = (rad < r0);
+            tag = (tag_cell > tag) ? tag_cell : tag;
+          }, Kokkos::Max<int>(sphere_flag)
+        );
+
+        if (sphere_flag > 0) { 
+          refine_flag.d_view(m + mbs) = 1; 
+        }
+
+      } else {
+
+        // Injection is over: relax back down, one level at a time, but
+        // never below floor_level = root_level + level_min. No spatial
+        // (sphere) restriction here -- every block above the floor is a
+        // derefine candidate; AthenaK still requires all 8 siblings to
+        // agree before an actual derefinement happens.
+        if (mblev.d_view(m) > floor_level) {
+          refine_flag.d_view(m + mbs) = -1;
+        }
+      }
+    });
+
+    refine_flag.template modify<DevExeSpace>();
+    refine_flag.template sync<HostMemSpace>();
   }
 }
