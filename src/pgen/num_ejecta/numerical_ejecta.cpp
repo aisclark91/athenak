@@ -73,6 +73,7 @@ namespace {
   Real nu_vel_ej;
   Real nu_temp_ej;
   Real delta_mdot_ej;
+  Real d_ism_ej;
 
   //Functors:
   void SetADMVariablesToFLRW(MeshBlockPack *pmbp);
@@ -166,7 +167,10 @@ Real Interpolate2D(const DualArray1D<Real> &theta, const DualArray2D<Real> &time
   const DualArray2D<Real>& var_ej, Real index, Real th, Real t) {
 
   Real var;
-  int size = time.view_device().extent(1);  
+  int size = time.view_device().extent(1);
+  // Clamp to the tabulated theta range to avoid linear extrapolation near the poles
+  int nth = theta.view_device().extent(0);
+  th = fmin(fmax(th, theta.d_view(0)), theta.d_view(nth-1));
   int ith = FindThetaIndex(theta, th);
   int jt  = FindTimeIndex(ith, time, t);
   int kt  = FindTimeIndex(ith+1, time, t);
@@ -274,8 +278,6 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   vr_eng          = pin->GetReal("problem", "vr_eng"); 
   Gamma_inf_eng   = pin->GetReal("problem", "Gamma_inf_eng");
   theta_j_eng     = pin->GetReal("problem", "theta_j_eng");
-  sigma_eng       = pin->GetReal("problem", "sigma_eng");
-
 
   // Pulsar Wind:
   B_star_wind  = pin->GetReal("problem", "B_star_wind");
@@ -290,6 +292,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   nu_mdot_ej = pin->GetReal("problem", "nu_mdot_ej");
   nu_vel_ej  = pin->GetReal("problem", "nu_vel_ej");
   nu_temp_ej = pin->GetReal("problem", "nu_temp_ej");
+  d_ism_ej   = pin->GetReal("problem", "d_ism");
 
   {
     // Reading:
@@ -302,9 +305,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   // AMR Warning: 
-  if (global_variable::my_rank == 0 && !pin->DoesBlockExist("refined_region1")) {
+  if (global_variable::my_rank == 0 && !pin->DoesBlockExist("refined_region0")) {
     std::cout << "WARNING: "
-              << "No <refined_region1> block found: mesh starts at root level and "
+              << "No <refined_region0> block found: mesh starts at root level and "
               << "RefinementCondition only derefines" << std::endl;
   }
 
@@ -661,6 +664,7 @@ namespace {
       const Real delta_mdot = delta_mdot_ej;
       const Real mask_tol = mask_tol_ej;
       const Real t_start = t_start_num_ej;
+      const Real d_ism = d_ism_ej;
 
       DualArray1D<Real> theta_tm("theta_arr", kNTheta);
       DualArray2D<Real> time_tm("time_arr", kNTheta, kNTime);
@@ -761,6 +765,9 @@ namespace {
           veloc *= cm_s_1;
           pres *= dyne_to_g_km3;
 
+          // Skip cells below the ISM density (e.g. mdot=0 in the data: den=0 gives h=inf, NaN cons)
+          if (den < d_ism) return;
+
           Real wvx;
           Real wvy;
           Real wvz;
@@ -831,7 +838,6 @@ namespace {
       const Real Gamma_inf = Gamma_inf_eng;
       const Real r0 = r0_ejecta;
       const Real theta_j = theta_j_eng;
-      const Real sigma = sigma_eng;
       const Real epsilon_tol = epsilon_tol_ej;  
       const Real mask_tol = mask_tol_ej;
 
@@ -880,7 +886,6 @@ namespace {
 
           Real w = 1.0 / sqrt(1.0 - SQR(vr));
           Real h = Gamma_inf/w;
-          Real eta = h/(1 + sigma); 
 
           // We convert from cgs, and K to [M] = g, [L]= km, [c] = 1, and [T] = 1.
           const Real g_cm3_to_g_km3 = 1.0/(cm_to_km*cm_to_km*cm_to_km);
@@ -888,7 +893,7 @@ namespace {
           const Real dyne_to_g_km3 = 1/SQR(c_cgs)*g_cm3_to_g_km3;
 
           den = Lj/(2.0*M_PI*(1 - cos(theta_j))*SQR(rad*km_to_cm)*(vr*c_cgs)*SQR(w)*h*SQR(c_cgs));
-          pres = (gamma - 1.0)/gamma*(eta - 1.0) * den * SQR(c_cgs);
+          pres = (gamma - 1.0)/gamma*(h - 1.0) * den * SQR(c_cgs);
 
           den *= g_cm3_to_g_km3;
           pres *= dyne_to_g_km3;
@@ -904,26 +909,8 @@ namespace {
             wvz = w * vr*x3v/rad;
           }
 
-          // Magnetic Field Prescription. Because den is already in our units and c=1
-          Real br = SQR(w)*den*eta*sigma;
-
-          // Adding the magnetic field. This will be used to compute the
-          // Momentum and energy cobtributions
-          Real bx;
-          Real by;
-          Real bz;
-          if (r_cil == 0) {
-            bx = 0.0;
-            by = 0.0;
-            bz = br*x3v/rad;
-          } else {
-            bx = br*x1v/rad;
-            by = br*x2v/rad;
-            bz = br*x3v/rad;
-          }
-
-          Real b2 = SQR(bx) + SQR(by) + SQR(bz);
-          h = 1.0 + gamma/(gamma-1.0) * pres/den + b2/(w*w)/den;
+          //By definition we need to incorporate only the gas enthalpy contribution h=(e+p)/rho
+          h = 1.0 + gamma/(gamma-1.0) * pres/den;
 
           // We will use the Lorentz values of br and bphi to compute the pressure.
           // Since the pressure is an scalar, and no further corrections are needed.
@@ -937,10 +924,10 @@ namespace {
           // Check ideal_grmhd.cpp for the correct routine to make the prim to cons, conversion
           Real u0_eq[5];
           u0_eq[0] = den*w;
-          u0_eq[1] = den*h*w*wvx + b2*wvx/w  - (bx*wvx/w + by*wvy/w + bz*wvz/w)*bx;
-          u0_eq[2] = den*h*w*wvy + b2*wvy/w  - (bx*wvx/w + by*wvy/w + bz*wvz/w)*by;
-          u0_eq[3] = den*h*w*wvz + b2*wvz/w  - (bx*wvx/w + by*wvy/w + bz*wvz/w)*bz;
-          u0_eq[4] = den*h*w*w + b2 - pres - 0.5*(SQR(bx*wvx/w + by*wvy/w + bz*wvz/w) + b2/(w*w)) - den*w;
+          u0_eq[1] = den*h*w*wvx; 
+          u0_eq[2] = den*h*w*wvy; 
+          u0_eq[3] = den*h*w*wvz; 
+          u0_eq[4] = den*h*w*w - pres  - w*den;
 
           u0(m,IDN,k,j,i) = u0_eq[0] + (u0_orig[0] - u0_eq[0])*exp(-epsilon_frac*beta_dt/tau);
           u0(m,IM1,k,j,i) = u0_eq[1] + (u0_orig[1] - u0_eq[1])*exp(-epsilon_frac*beta_dt/tau);
