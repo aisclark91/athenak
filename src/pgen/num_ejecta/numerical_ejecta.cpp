@@ -61,7 +61,7 @@ namespace {
   Real B_star_wind;  
   Real R_star_wind; 
   Real P_star_wind;  
-  Real Gammaw_wind;  
+  Real w_eq_wind;  
   Real sigma_w_wind; 
   Real u_w_wind;
 
@@ -86,23 +86,14 @@ namespace {
 
 
 KOKKOS_INLINE_FUNCTION
-Real Bw_phi(const Real &th, const Real &B_star, const Real &R_star, const Real &P_star, const Real &r0) {
-   //speed of light
+Real den_eq(const Real &B_star, const Real &R_star, const Real &P_star, const Real &r0, 
+            const Real &w_eq, const Real &sigma_w) {
   Real c_cgs = units::Units::speed_of_light_cgs;
-  Real Lw = 2/(3*c_cgs)*SQR(B_star/(1.0e14))*Kokkos::pow((R_star/1.0e6), 4)*Kokkos::pow(P_star, -2); 
-  Real Bw2 = 3.0*Lw*SQR(sin(th))/(2.0*r0*c_cgs);
-  Real Bw = sqrt(Bw2); 
-  return Bw;
-}
-
-KOKKOS_INLINE_FUNCTION
-Real den_w(const Real &th, const Real &B_star, const Real &R_star, const Real &P_star, 
-           const Real &Gammaw, const Real &sigma_w, const Real &r0) {
-  Real c_cgs = units::Units::speed_of_light_cgs;
-  Real Lw = 2/(3*c_cgs)*SQR(B_star/(1.0e14))*Kokkos::pow((R_star/1.0e6), 4)*Kokkos::pow(P_star, -2); 
-  Real Bw2 = 3.0*Lw/(2.0*r0*1.0e5*c_cgs);
-  Real rhow = Bw2/(SQR(Gammaw)*SQR(c_cgs)*sigma_w); 
-  return rhow;
+  Real km_to_cm = 1.0e5;
+  Real Lw = 2/(3*c_cgs)*SQR(B_star)*Kokkos::pow(R_star, 4)*SQR(2.0*M_PI/P_star); 
+  Real Bw2 = 3.0*Lw/(2.0*SQR(r0*km_to_cm)*c_cgs);
+  Real den_w = Bw2/(SQR(w_eq*c_cgs)*sigma_w);
+  return den_w;
 }
 
 
@@ -283,7 +274,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   B_star_wind  = pin->GetReal("problem", "B_star_wind");
   R_star_wind  = pin->GetReal("problem", "R_star_wind");
   P_star_wind  = pin->GetReal("problem", "P_star_wind");
-  Gammaw_wind  = pin->GetReal("problem", "Gammaw_wind");
+  w_eq_wind    = pin->GetReal("problem", "w_eq_wind");
   sigma_w_wind = pin->GetReal("problem", "sigma_w_wind");
   u_w_wind     = pin->GetReal("problem", "u_w_wind");
 
@@ -869,7 +860,7 @@ namespace {
         Real theta = acos(x3v/rad);
         Real theta_min = M_PI - theta_j;
 
-        if ((rad > 0) && (epsilon_frac > mask_tol) && ((theta < theta_j) || (theta > theta_min))) {
+        if ((epsilon_frac > mask_tol) && ((theta < theta_j) || (theta > theta_min))) {
 
           Real den;
           Real wvx;
@@ -892,7 +883,7 @@ namespace {
           const Real cm_s_1 = 1/c_cgs;
           const Real dyne_to_g_km3 = 1/SQR(c_cgs)*g_cm3_to_g_km3;
 
-          den = Lj/(2.0*M_PI*(1 - cos(theta_j))*SQR(rad*km_to_cm)*(vr*c_cgs)*SQR(w)*h*SQR(c_cgs));
+          den = Lj/(2.0*M_PI*(1 - cos(theta_j))*SQR(r0*km_to_cm)*(vr*c_cgs)*SQR(w)*h*SQR(c_cgs));
           pres = (gamma - 1.0)/gamma*(h - 1.0) * den * SQR(c_cgs);
 
           den *= g_cm3_to_g_km3;
@@ -942,14 +933,13 @@ namespace {
 
   void SetPulsarWind(Mesh *pm, const Real beta_dt) {
 
-    // This is where we would set the source terms for the pulsar wind, if we wanted to.
     if (!set_wind) {
       return;
     }
 
     MeshBlockPack *pmbp = pm->pmb_pack; 
-    Real tau = pmbp->pmesh->dt;    
-
+    Real tau = beta_dt;
+    const Real t_code = pmbp->pmesh->time; 
     auto &indcs = pmbp->pmesh->mb_indcs;
     int is = indcs.is;
     int js = indcs.js;
@@ -958,24 +948,25 @@ namespace {
     int je = indcs.je;
     int ke = indcs.ke;
     int nmb1 = pmbp->nmb_thispack - 1;
-    auto &size = pmbp->pmb->mb_size;
-    auto &adm = pmbp->padm->adm;
-    
+    auto &size = pmbp->pmb->mb_size; 
+
     if (pmbp->pmhd != nullptr) {
       EOS_Data &eos = pmbp->pmhd->peos->eos_data;
       Real gamma = eos.gamma;
       DvceArray5D<Real> &u0 = pmbp->pmhd->u0;
 
-      const Real B_star  = B_star_wind;
-      const Real R_star  = R_star_wind;
-      const Real P_star  = P_star_wind;
-      const Real Gammaw  = Gammaw_wind;
-      const Real u_wind  = u_w_wind;
-      const Real sigma_w = sigma_w_wind;
-      const Real r0      = r0_ejecta;
-      const Real epsilon_tol = epsilon_tol_ej;
+      const Real B_star = B_star_wind;
+      const Real R_star = R_star_wind;
+      const Real P_star = P_star_wind;
+      const Real w_eq = w_eq_wind;
+      const Real u_wind = u_w_wind; 
+      const Real sigma_w = sigma_w_wind; 
+      const Real r0 = r0_ejecta;
+      const Real vr = sqrt(SQR(w_eq) - 1.0)/w_eq;
+      const Real epsilon_tol = epsilon_tol_ej;  
+      const Real mask_tol = mask_tol_ej;
 
-      par_for("pulsar_wind", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
+      par_for("central_engine", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
         
         Real &x1min = size.d_view(m).x1min;
@@ -998,32 +989,16 @@ namespace {
         Real rad = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
         Real r_cil = sqrt(SQR(x1v) + SQR(x2v));
 
-        const Real& alpha = adm.alpha(m, k, j, i);
-
         Real band = epsilon_tol * dl;
-        Real epsilon_frac = TransitionEpsilon(band, r0/alpha, rad);
-        Real theta = acos(x3v/rad);
+        Real epsilon_frac = TransitionEpsilon(band, r0, rad);
 
-        if (epsilon_frac > 1.0e-3) {
-
-          Real g3d[NSPMETRIC] = {adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
-                                 adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
-                                 adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i)};
-
-          Real detg = adm::SpatialDet(g3d[S11], g3d[S12], g3d[S13],
-                                      g3d[S22], g3d[S23], g3d[S33]);
-          Real vol = sqrt(detg);
-
+        if (epsilon_frac > mask_tol) {
+    
           Real den;
           Real wvx;
           Real wvy;
           Real wvz;
-          Real vr;
-          Real wv_x;
-          Real wv_y;
-          Real wv_z;
           Real pres;
-          Real bphi;
 
           // Check units here, and finally at wind
           const Real cm_to_km = 1.0e-5;
@@ -1033,64 +1008,30 @@ namespace {
           const Real km_to_s = 1/s_to_km;  
           const Real a_cgs = units::Units::rad_constant_cgs;
 
-          den = den_w(theta, B_star, R_star, P_star, Gammaw, sigma_w, r0/alpha);
-          vr = c_cgs*sqrt(1- SQR(1/Gammaw));
-          pres = u_wind/3.0/(4.0*M_PI*SQR(alpha*rad*km_to_cm/alpha));
-          bphi = Bw_phi(theta, B_star, R_star, P_star, r0/alpha); 
+          den = den_eq(B_star, R_star, P_star, r0, w_eq, sigma_w);
+          Real e_den = 3.0*u_wind/(4.0*M_PI*Kokkos::pow(r0*km_to_cm, 3));
+          pres = e_den*(gamma - 1.0);
 
           // Change of units from cgs to code:
-          const Real mu = 1.0; // see MNRAS 535, 3711–3731 (2024)
           const Real g_cm3_to_g_km3 = 1.0/(cm_to_km*cm_to_km*cm_to_km);
-          const Real cm_s_1 = 1/c_cgs;
-          const Real K_to_1 = units::Units::k_boltzmann_cgs*SQR(cm_s_1)/(mu*units::Units::atomic_mass_unit_cgs);
           const Real dyne_to_g_km3 = 1/SQR(c_cgs)*g_cm3_to_g_km3;
 
           den *= g_cm3_to_g_km3;
-          vr /= c_cgs;
           pres *= dyne_to_g_km3;
-          bphi *= sqrt(dyne_to_g_km3);
-
-          Real h = den + ((gamma -1)/gamma)*pres + SQR(bphi/Gammaw);
-          
+         
+          Real h = 1.0 + gamma/(gamma-1.0) * pres/den;
           if (r_cil == 0) {
             wvx = 0.0;
             wvy = 0.0;
-            wvz = Gammaw * (vr*x3v/rad)/alpha;
+            wvz = w_eq*vr*x3v/rad;
           } else {
-            wvx = Gammaw * (vr*x1v/rad)/alpha;
-            wvy = Gammaw * (vr*x2v/rad)/alpha;
-            wvz = Gammaw * (vr*x3v/rad)/alpha;
+            wvx = w_eq*vr*x1v/rad;
+            wvy = w_eq*vr*x2v/rad;
+            wvz = w_eq*vr*x3v/rad;
           }
 
-          Real v[3] = {wvx, wvy, wvz};
-          Real v2 = Primitive::SquareVector(v, g3d);
-          Real w = sqrt(1.0 + v2); 
-
-          wv_x = g3d[S11]*wvx + g3d[S12]*wvy + g3d[S13]*wvz;
-          wv_y = g3d[S12]*wvx + g3d[S22]*wvy + g3d[S23]*wvz;
-          wv_z = g3d[S13]*wvx + g3d[S23]*wvy + g3d[S33]*wvz;
-
-          Real bx;
-          Real by;
-          Real bz;
-          if (r_cil == 0) {
-            bx = 0.0;
-            by = 0.0;
-            bz = 0.0;
-          } else {
-            bx = -bphi*(x2v/r_cil)/SQR(alpha);
-            by =  bphi*(x1v/r_cil)/SQR(alpha);
-            bz = 0.0;
-          }
-
-          //Lowering the magnetic field:
-          Real b_x = g3d[S11]*bx + g3d[S12]*by + g3d[S13]*bz;
-          Real b_y = g3d[S12]*bx + g3d[S22]*by + g3d[S23]*bz;
-          Real b_z = g3d[S13]*bx + g3d[S23]*by + g3d[S33]*bz;
-          Real b2 = b_x * bx + b_y * by + b_z * bz;
-
-          // Now we need to reconstruct the conservative variables
-
+          // We will use the Lorentz values of br and bphi to compute the pressure.
+          // Since the pressure is an scalar, and no further corrections are needed.
           Real u0_orig[5];
           u0_orig[0] = u0(m,IDN,k,j,i);
           u0_orig[1] = u0(m,IM1,k,j,i);
@@ -1098,23 +1039,25 @@ namespace {
           u0_orig[3] = u0(m,IM3,k,j,i);
           u0_orig[4] = u0(m,IEN,k,j,i);
 
+          // Check ideal_grmhd.cpp for the correct routine to make the prim to cons, conversion
           Real u0_eq[5];
-          u0_eq[0] = vol*den*w;
-          u0_eq[1] = vol*(den*h*w*wv_x + b2*wv_x/w  - (bx*wv_x/w + by*wv_y/w + bz*wv_z/w)*b_x);
-          u0_eq[2] = vol*(den*h*w*wv_y + b2*wv_y/w  - (bx*wv_x/w + by*wv_y/w + bz*wv_z/w)*b_y);
-          u0_eq[3] = vol*(den*h*w*wv_z + b2*wv_z/w  - (bx*wv_x/w + by*wv_y/w + bz*wv_z/w)*b_z);
-          u0_eq[4] = vol*(den*h*w*w + b2 - pres - 0.5*(SQR(bx*wv_x/w + by*wv_y/w + bz*wv_z/w) + b2/(w*w)) - den*w);
+          u0_eq[0] = den*w_eq;
+          u0_eq[1] = den*h*w_eq*wvx; 
+          u0_eq[2] = den*h*w_eq*wvy; 
+          u0_eq[3] = den*h*w_eq*wvz; 
+          u0_eq[4] = den*h*w_eq*w_eq - pres  - w_eq*den;
 
-          u0(m,IDN,k,j,i) += -alpha*vol*beta_dt*(u0_orig[0] - u0_eq[0])/tau * epsilon_frac;
-          u0(m,IM1,k,j,i) += -alpha*vol*beta_dt*(u0_orig[1] - u0_eq[1])/tau * epsilon_frac;
-          u0(m,IM2,k,j,i) += -alpha*vol*beta_dt*(u0_orig[2] - u0_eq[2])/tau * epsilon_frac;
-          u0(m,IM3,k,j,i) += -alpha*vol*beta_dt*(u0_orig[3] - u0_eq[3])/tau * epsilon_frac;
-          u0(m,IEN,k,j,i) += -alpha*vol*beta_dt*(u0_orig[4] - u0_eq[4])/tau * epsilon_frac;
+          u0(m,IDN,k,j,i) = u0_eq[0] + (u0_orig[0] - u0_eq[0])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IM1,k,j,i) = u0_eq[1] + (u0_orig[1] - u0_eq[1])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IM2,k,j,i) = u0_eq[2] + (u0_orig[2] - u0_eq[2])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IM3,k,j,i) = u0_eq[3] + (u0_orig[3] - u0_eq[3])*exp(-epsilon_frac*beta_dt/tau);
+          u0(m,IEN,k,j,i) = u0_eq[4] + (u0_orig[4] - u0_eq[4])*exp(-epsilon_frac*beta_dt/tau);  
         }
       });
     } 
     return;
   }
+
 
   void SetUserSources(Mesh* pm, const Real bdt) {
     const Real t = pm->time;
