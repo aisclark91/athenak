@@ -627,7 +627,7 @@ namespace {
     MeshBlockPack *pmbp = pm->pmb_pack;
     const Real t_code = pmbp->pmesh->time;
     //Real tau = pmbp->pmesh->dt;
-    Real tau = beta_dt;
+    Real tau = beta_dt/10.0;
 
     auto &indcs = pmbp->pmesh->mb_indcs;
     int is = indcs.is;
@@ -807,7 +807,7 @@ namespace {
     }
 
     MeshBlockPack *pmbp = pm->pmb_pack; 
-    Real tau = beta_dt;
+    Real tau = beta_dt/10.0;
     const Real t_code = pmbp->pmesh->time; 
     auto &indcs = pmbp->pmesh->mb_indcs;
     int is = indcs.is;
@@ -938,7 +938,7 @@ namespace {
     }
 
     MeshBlockPack *pmbp = pm->pmb_pack; 
-    Real tau = beta_dt;
+    Real tau = beta_dt/10.0;
     const Real t_code = pmbp->pmesh->time; 
     auto &indcs = pmbp->pmesh->mb_indcs;
     int is = indcs.is;
